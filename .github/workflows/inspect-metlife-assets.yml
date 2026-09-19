@@ -1,0 +1,40 @@
+name: inspect-metlife-assets
+on:
+  push:
+    paths:
+      - '.github/workflows/inspect-metlife-assets.yml'
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect public product pages
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          urls=(
+            "https://www.metlife.com.cn/insurance-products/future/duhuilexiang-fenhongxian"
+            "https://www.metlife.com.cn/insurance-products/future/duhuichangying-fenhongxian"
+          )
+          for u in "${urls[@]}"; do
+            echo "===== $u =====" >> out/result.txt
+            curl -A "Mozilla/5.0" -L --retry 3 --connect-timeout 20 --max-time 90 "$u" -o out/page.html || true
+            grep -Eo 'https?://[^"<> ]+|/strapi-uploads/assets/[^"<> ]+' out/page.html | grep -Ei '(pdf|zip|api|strapi)' | sort -u >> out/result.txt || true
+            grep -Eo '/[^"<> ]+\.js' out/page.html | sort -u | head -n 80 >> out/js.txt || true
+          done
+          python - <<'PY' >> out/result.txt
+          from pathlib import Path
+          import re
+          s=Path("out/page.html").read_text("utf-8","ignore") if Path("out/page.html").exists() else ""
+          print("\n=== PDF-ish refs ===")
+          for x in sorted(set(re.findall(r'[^"\\'<> ]{0,100}(?:pdf|zip)[^"\\'<> ]{0,100}',s,re.I))):
+              print(x)
+          print("\n=== API-ish refs ===")
+          for x in sorted(set(re.findall(r'[^"\\'<> ]{0,100}(?:api|strapi)[^"\\'<> ]{0,100}',s,re.I)))[:500]:
+              print(x)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metlife-inspection
+          path: out/
