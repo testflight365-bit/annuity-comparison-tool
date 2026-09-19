@@ -1,40 +1,82 @@
-name: inspect-metlife-assets
+name: inspect-public-assets
 on:
   push:
     paths:
       - '.github/workflows/inspect-metlife-assets.yml'
   workflow_dispatch:
+permissions:
+  contents: read
 jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Inspect public product pages
+      - name: Inspect public product pages and PDF links
         shell: bash
         run: |
-          set -euxo pipefail
-          mkdir -p out
-          urls=(
-            "https://www.metlife.com.cn/insurance-products/future/duhuilexiang-fenhongxian"
-            "https://www.metlife.com.cn/insurance-products/future/duhuichangying-fenhongxian"
-          )
-          for u in "${urls[@]}"; do
-            echo "===== $u =====" >> out/result.txt
-            curl -A "Mozilla/5.0" -L --retry 3 --connect-timeout 20 --max-time 90 "$u" -o out/page.html || true
-            grep -Eo 'https?://[^"<> ]+|/strapi-uploads/assets/[^"<> ]+' out/page.html | grep -Ei '(pdf|zip|api|strapi)' | sort -u >> out/result.txt || true
-            grep -Eo '/[^"<> ]+\.js' out/page.html | sort -u | head -n 80 >> out/js.txt || true
-          done
-          python - <<'PY' >> out/result.txt
+          set -euo pipefail
+          mkdir -p out/pages
+          python - <<'PY'
           from pathlib import Path
-          import re
-          s=Path("out/page.html").read_text("utf-8","ignore") if Path("out/page.html").exists() else ""
-          print("\n=== PDF-ish refs ===")
-          for x in sorted(set(re.findall(r'[^"\\'<> ]{0,100}(?:pdf|zip)[^"\\'<> ]{0,100}',s,re.I))):
-              print(x)
-          print("\n=== API-ish refs ===")
-          for x in sorted(set(re.findall(r'[^"\\'<> ]{0,100}(?:api|strapi)[^"\\'<> ]{0,100}',s,re.I)))[:500]:
-              print(x)
+          from urllib.request import Request, urlopen
+          from urllib.parse import urljoin
+          import re, hashlib
+
+          pages = [
+            "https://www.metlife.com.cn/insurance-products/future/duhuilexiang-fenhongxian",
+            "https://www.metlife.com.cn/insurance-products/future/duhuichangying-fenhongxian",
+            "https://www.manulife-sinochem.com/product/pension/fengxiannianjinbaoxianlexiangban",
+          ]
+          ua={"User-Agent":"Mozilla/5.0"}
+          found=set()
+          log=[]
+          for idx,u in enumerate(pages):
+              try:
+                  req=Request(u,headers=ua)
+                  with urlopen(req,timeout=90) as r:
+                      b=r.read()
+                  Path(f"out/pages/page{idx}.html").write_bytes(b)
+                  s=b.decode("utf-8","ignore")
+                  log.append(f"PAGE {u} bytes={len(b)}")
+                  pats=[
+                      r"https?://[^\"'<> ]+",
+                      r"/strapi-uploads/assets/[^\"'<> ]+",
+                      r"/html/zh/static/attach/[^\"'<> ]+",
+                      r"[^\"'<> ]+\.pdf(?:\?[^\"'<> ]*)?",
+                  ]
+                  for pat in pats:
+                      for x in re.findall(pat,s,re.I):
+                          x=x.replace("&amp;","&")
+                          if ".pdf" in x.lower() or "attach" in x.lower() or "strapi-uploads" in x.lower():
+                              found.add(urljoin(u,x))
+              except Exception as e:
+                  log.append(f"ERROR {u}: {e!r}")
+
+          Path("out/links.txt").write_text("\n".join(sorted(found)),encoding="utf-8")
+          Path("out/result.txt").write_text("\n".join(log)+"\n\nLINKS\n"+"\n".join(sorted(found)),encoding="utf-8")
+
+          # Download PDF candidates small enough for inspection and record hashes.
+          rows=[]
+          for i,u in enumerate(sorted(found)):
+              if ".pdf" not in u.lower():
+                  continue
+              try:
+                  req=Request(u,headers=ua)
+                  with urlopen(req,timeout=120) as r:
+                      b=r.read()
+                  if b[:4] != b"%PDF":
+                      rows.append(f"NOTPDF\t{len(b)}\t{u}")
+                      continue
+                  h=hashlib.sha256(b).hexdigest()
+                  rows.append(f"{h}\t{len(b)}\t{u}")
+                  # keep only modest candidates in artifact
+                  if len(b) <= 15_000_000:
+                      Path(f"out/candidate_{i}.pdf").write_bytes(b)
+              except Exception as e:
+                  rows.append(f"ERROR\t{u}\t{e!r}")
+          Path("out/hashes.tsv").write_text("\n".join(rows),encoding="utf-8")
           PY
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: metlife-inspection
+          name: public-asset-inspection
           path: out/
