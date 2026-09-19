@@ -1,4 +1,4 @@
-name: inspect-public-assets
+name: inspect-deployment-sources
 on:
   push:
     paths:
@@ -8,37 +8,148 @@ jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Hash public document candidates
+      - name: Inspect exact public sources
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p out
+          mkdir -p out/msl out/metlife
           python - <<'PY'
           from pathlib import Path
-          from urllib.request import Request, urlopen
-          import hashlib
-          urls = [
-            "https://www.aia.com.cn/content/dam/cn/zh-cn/docs/public-disclosure/brochure/B3184-1%E5%8F%8B%E9%82%A6%E6%B0%B8%E8%A3%95%E4%BA%BA%E7%94%9F%E5%B9%B4%E9%87%91%E4%BF%9D%E9%99%A9%EF%BC%88%E5%88%86%E7%BA%A2%E5%9E%8B%EF%BC%89%E7%9A%84%E4%BA%A7%E5%93%81%E8%AF%B4%E6%98%8E%E4%B9%A6.pdf",
-            "https://www.metlife.com.cn/strapi-uploads/assets/_ed8c553701.pdf",
-            "https://www.metlife.com.cn/strapi-uploads/assets/_807a621e40.pdf",
-            "https://www.metlife.com.cn/strapi-uploads/assets/_52f89d65a0.pdf",
-            "https://www.metlife.com.cn/strapi-uploads/assets/_39e6fdbce3.pdf",
-            "https://www.manulife-sinochem.com/html/zh/static/attach/pptbitoc-20220729-x931b952.pdf",
-            "https://www.manulife-sinochem.com/html/zh/static/attach/1756693080411/AOC-2025-070-terms.pdf",
-          ]
+          from urllib.request import Request,urlopen
+          from urllib.parse import urljoin
+          import hashlib,re,zipfile,io
+
+          UA={"User-Agent":"Mozilla/5.0"}
+
+          def get(u, timeout=120):
+              with urlopen(Request(u,headers=UA),timeout=timeout) as r:
+                  return r.read(), r.geturl()
+
+          # 1) MSL official product package
+          msl="https://www.manulife-sinochem.com/html/zh/static/attach/1756693085919/AOC-2025-070-package.zip"
           rows=[]
-          for i,u in enumerate(urls,1):
+          try:
+              b,fu=get(msl,180)
+              Path("out/msl/package.zip").write_bytes(b)
+              rows.append(f"ZIP\t{len(b)}\t{hashlib.sha256(b).hexdigest()}\t{fu}")
+              with zipfile.ZipFile(io.BytesIO(b)) as z:
+                  for n in z.namelist():
+                      if n.endswith("/"): continue
+                      x=z.read(n)
+                      rows.append(f"FILE\t{len(x)}\t{hashlib.sha256(x).hexdigest()}\t{n}")
+                      safe=Path(n).name
+                      Path("out/msl",safe).write_bytes(x)
+          except Exception as e:
+              rows.append(f"ERROR\t{e!r}")
+          Path("out/msl/hashes.tsv").write_text("\n".join(rows),encoding="utf-8")
+
+          # 2) MetLife crawl: robots/sitemaps + relevant public disclosure pages
+          seeds=[
+            "https://www.metlife.com.cn/robots.txt",
+            "https://www.metlife.com.cn/sitemap.xml",
+            "https://www.metlife.com.cn/information-disclosure/public-information-disclosure/basic-information/basic-product-information/",
+            "https://www.metlife.com.cn/insurance-products/future/duhuilexiang-fenhongxian",
+            "https://www.metlife.com.cn/insurance-products/future/duhuichangying-fenhongxian",
+          ]
+          texts={}
+          log=[]
+          for u in seeds:
               try:
-                  with urlopen(Request(u,headers={"User-Agent":"Mozilla/5.0"}),timeout=180) as r:
-                      b=r.read()
-                  Path(f"out/candidate_{i}.pdf").write_bytes(b)
-                  rows.append(f"{hashlib.sha256(b).hexdigest()}\t{len(b)}\t{u}")
+                  b,fu=get(u)
+                  s=b.decode("utf-8","ignore")
+                  texts[fu]=s
+                  log.append(f"SEED\t{len(b)}\t{fu}")
+                  Path("out/metlife",f"seed_{len(texts)}.txt").write_text(s,encoding="utf-8")
               except Exception as e:
-                  rows.append(f"ERROR\t0\t{u}\t{e!r}")
-          Path("out/hashes.tsv").write_text("\n".join(rows),encoding="utf-8")
+                  log.append(f"ERROR\t{u}\t{e!r}")
+
+          # recursively fetch sitemap URLs
+          sitemap_urls=set()
+          for u,s in list(texts.items()):
+              for x in re.findall(r'https?://[^<\s"]+',s):
+                  x=x.replace("&amp;","&").strip()
+                  if "sitemap" in x.lower() and "metlife.com.cn" in x:
+                      sitemap_urls.add(x)
+          for sm in list(sitemap_urls)[:50]:
+              if sm in texts: continue
+              try:
+                  b,fu=get(sm)
+                  s=b.decode("utf-8","ignore")
+                  texts[fu]=s
+                  log.append(f"SITEMAP\t{len(b)}\t{fu}")
+              except Exception as e:
+                  log.append(f"SMERR\t{sm}\t{e!r}")
+
+          # discover likely product/disclosure URLs
+          urls=set()
+          for base,s in texts.items():
+              for x in re.findall(r'https?://[^<\s"\']+',s):
+                  x=x.replace("&amp;","&").strip()
+                  xl=x.lower()
+                  if "metlife.com.cn" in xl and (
+                      "lexiang" in xl or "changying" in xl or
+                      "available-products" in xl or "basic-product-information" in xl
+                  ):
+                      urls.add(x)
+              for h in re.findall(r'href=["\']([^"\']+)["\']',s,re.I):
+                  hu=urljoin(base,h.replace("&amp;","&"))
+                  hl=hu.lower()
+                  if "metlife.com.cn" in hl and (
+                      "lexiang" in hl or "changying" in hl or
+                      "available-products" in hl or "basic-product-information" in hl
+                  ):
+                      urls.add(hu)
+
+          # Add slug guesses
+          base="https://www.metlife.com.cn/information-disclosure/public-information-disclosure/basic-information/basic-product-information/available-products/"
+          for slug in [
+              "douhuilexiang","douhuilexiangnianjinbaoxian","douhuilexiangnianjinbaoxianfenhongxing",
+              "duhuilexiang","duhuilexiangnianjinbaoxian","duhuilexiangnianjinbaoxianfenhongxing",
+              "douhuichangying","douhuichangying2026","douhuichangyingnianjinbaoxianfenhongxing",
+              "duhuichangying","duhuichangying2026","duhuichangyingnianjinbaoxianfenhongxing"
+          ]:
+              urls.add(base+slug)
+
+          # fetch likely pages, keep those mentioning target Chinese names or yielding pdf refs
+          page_rows=[]
+          pdfs=set()
+          for u in sorted(urls)[:800]:
+              try:
+                  b,fu=get(u,60)
+                  s=b.decode("utf-8","ignore")
+                  refs=set()
+                  for h in re.findall(r'(?:href|src)=["\']([^"\']+)["\']',s,re.I):
+                      hu=urljoin(fu,h.replace("&amp;","&"))
+                      if ".pdf" in hu.lower() or "/strapi-uploads/assets/" in hu:
+                          refs.add(hu)
+                  hit=("都会乐享" in s) or ("都会长盈" in s) or bool(refs)
+                  if hit:
+                      page_rows.append(f"PAGE\t{len(b)}\t{fu}\t乐享={'都会乐享' in s}\t长盈={'都会长盈' in s}\trefs={len(refs)}")
+                      for p in refs:
+                          pdfs.add(p)
+                          page_rows.append(f"REF\t{p}")
+              except Exception:
+                  pass
+
+          # hash all discovered PDF refs
+          hash_rows=[]
+          for i,u in enumerate(sorted(pdfs),1):
+              try:
+                  b,fu=get(u,180)
+                  h=hashlib.sha256(b).hexdigest()
+                  hash_rows.append(f"{h}\t{len(b)}\t{fu}")
+                  if b.startswith(b"%PDF") and len(b)<=15_000_000:
+                      Path("out/metlife",f"pdf_{i}.pdf").write_bytes(b)
+              except Exception as e:
+                  hash_rows.append(f"ERROR\t0\t{u}\t{e!r}")
+
+          Path("out/metlife/log.txt").write_text("\n".join(log),encoding="utf-8")
+          Path("out/metlife/pages.tsv").write_text("\n".join(page_rows),encoding="utf-8")
+          Path("out/metlife/hashes.tsv").write_text("\n".join(hash_rows),encoding="utf-8")
+          Path("out/metlife/urls.txt").write_text("\n".join(sorted(urls)),encoding="utf-8")
           PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: public-asset-hashes
+          name: deployment-source-inspection
           path: out/
