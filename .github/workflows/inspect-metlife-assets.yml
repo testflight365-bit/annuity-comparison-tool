@@ -4,40 +4,39 @@ on:
     paths:
       - '.github/workflows/inspect-metlife-assets.yml'
   workflow_dispatch:
-permissions:
-  contents: read
 jobs:
   inspect:
     runs-on: ubuntu-latest
     steps:
-      - name: Hash candidate public documents
+      - name: Hash public document candidates
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out
-          cat > out/urls.txt <<'EOF'
-https://www.aia.com.cn/content/dam/cn/zh-cn/docs/public-disclosure/brochure/B3184-1%E5%8F%8B%E9%82%A6%E6%B0%B8%E8%A3%95%E4%BA%BA%E7%94%9F%E5%B9%B4%E9%87%91%E4%BF%9D%E9%99%A9%EF%BC%88%E5%88%86%E7%BA%A2%E5%9E%8B%EF%BC%89%E7%9A%84%E4%BA%A7%E5%93%81%E8%AF%B4%E6%98%8E%E4%B9%A6.pdf
-https://www.metlife.com.cn/strapi-uploads/assets/_ed8c553701.pdf
-https://www.metlife.com.cn/strapi-uploads/assets/_807a621e40.pdf
-https://www.metlife.com.cn/strapi-uploads/assets/_52f89d65a0.pdf
-https://www.metlife.com.cn/strapi-uploads/assets/_39e6fdbce3.pdf
-https://www.manulife-sinochem.com/html/zh/static/attach/pptbitoc-20220729-x931b952.pdf
-https://www.manulife-sinochem.com/html/zh/static/attach/1756693080411/AOC-2025-070-terms.pdf
-EOF
-          : > out/hashes.tsv
-          n=0
-          while IFS= read -r u; do
-            n=$((n+1))
-            f="out/candidate_$n.pdf"
-            if curl -A "Mozilla/5.0" -L --fail --retry 2 --connect-timeout 20 --max-time 180 "$u" -o "$f"; then
-              sha=$(sha256sum "$f" | awk '{print $1}')
-              bytes=$(wc -c < "$f")
-              printf '%s\t%s\t%s\n' "$sha" "$bytes" "$u" >> out/hashes.tsv
-            else
-              printf 'ERROR\t0\t%s\n' "$u" >> out/hashes.tsv
-              rm -f "$f"
-            fi
-          done < out/urls.txt
+          python - <<'PY'
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          import hashlib
+          urls = [
+            "https://www.aia.com.cn/content/dam/cn/zh-cn/docs/public-disclosure/brochure/B3184-1%E5%8F%8B%E9%82%A6%E6%B0%B8%E8%A3%95%E4%BA%BA%E7%94%9F%E5%B9%B4%E9%87%91%E4%BF%9D%E9%99%A9%EF%BC%88%E5%88%86%E7%BA%A2%E5%9E%8B%EF%BC%89%E7%9A%84%E4%BA%A7%E5%93%81%E8%AF%B4%E6%98%8E%E4%B9%A6.pdf",
+            "https://www.metlife.com.cn/strapi-uploads/assets/_ed8c553701.pdf",
+            "https://www.metlife.com.cn/strapi-uploads/assets/_807a621e40.pdf",
+            "https://www.metlife.com.cn/strapi-uploads/assets/_52f89d65a0.pdf",
+            "https://www.metlife.com.cn/strapi-uploads/assets/_39e6fdbce3.pdf",
+            "https://www.manulife-sinochem.com/html/zh/static/attach/pptbitoc-20220729-x931b952.pdf",
+            "https://www.manulife-sinochem.com/html/zh/static/attach/1756693080411/AOC-2025-070-terms.pdf",
+          ]
+          rows=[]
+          for i,u in enumerate(urls,1):
+              try:
+                  with urlopen(Request(u,headers={"User-Agent":"Mozilla/5.0"}),timeout=180) as r:
+                      b=r.read()
+                  Path(f"out/candidate_{i}.pdf").write_bytes(b)
+                  rows.append(f"{hashlib.sha256(b).hexdigest()}\t{len(b)}\t{u}")
+              except Exception as e:
+                  rows.append(f"ERROR\t0\t{u}\t{e!r}")
+          Path("out/hashes.tsv").write_text("\n".join(rows),encoding="utf-8")
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
