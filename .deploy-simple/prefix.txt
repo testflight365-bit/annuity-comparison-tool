@@ -1,1 +1,112 @@
-The requested file reference is not currently visible. Use files.search or files.list to rediscover the file, then retry with a returned ref_id or file_id.
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>快返年金同业对比</title>
+<style>
+:root{--ink:#18232E;--ink2:#4A5866;--mute:#7C8894;--rule:#DDE3E8;--bg:#F4F6F8;--card:#fff;
+ --steel:#1F5F8B;--steelw:#E8F0F6;--own:#A6432E;--ownw:#FBEEEA;--good:#2F6B4F;--warn:#9A6A12;
+ --fs:14px;--fsS:12.5px}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:var(--fs)/1.55 -apple-system,"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif}
+header{background:var(--ink);color:#fff;padding:12px 16px;display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px}
+header h1{font-size:18px;margin:0;font-weight:600}
+header .meta{color:#AFC0CF;font-size:var(--fsS);flex:1}
+button{font-family:inherit;font-size:var(--fsS);cursor:pointer}
+.btn{border:1px solid var(--steel);background:var(--steel);color:#fff;border-radius:4px;padding:6px 14px;font-size:13px}
+.btn.ghost{background:#fff;color:var(--steel)}
+main{padding:12px 16px 40px;max-width:100%}
+.card{background:var(--card);border:1px solid var(--rule);border-radius:6px;padding:12px 14px;margin-bottom:10px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px 12px}
+label.l{display:block;font-size:var(--fsS);color:var(--ink2);margin-bottom:3px}
+select,input[type=text],input[type=number]{width:100%;font:inherit;font-size:13.5px;padding:5px 8px;border:1px solid #C9D1D8;border-radius:4px;background:#fff;color:var(--ink)}
+.row2{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:flex-end;margin-top:10px;padding-top:10px;border-top:1px dashed var(--rule)}
+.row2 .grp{min-width:0}
+.seg{display:inline-flex;border:1px solid #C9D1D8;border-radius:4px;overflow:hidden;flex-wrap:wrap}
+.seg button{border:0;border-right:1px solid #C9D1D8;background:#fff;padding:5px 11px;color:var(--ink)}
+.seg button:last-child{border-right:0}
+.seg button[aria-pressed=true]{background:var(--steel);color:#fff}
+.hl{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 10px}
+.hl span{background:#fff;border:1px solid var(--rule);border-radius:14px;padding:3px 11px;font-size:13px}
+.hl b{color:var(--steel)}
+.hl .o{border-color:#E4C3BA;background:var(--ownw)}.hl .o b{color:var(--own)}
+.wrap{overflow:auto;max-height:78vh;border:1px solid var(--rule);border-radius:6px;background:#fff}
+table{border-collapse:separate;border-spacing:0;font-size:13px}
+th,td{padding:6px 9px;border-bottom:1px solid var(--rule);border-right:1px solid #EEF1F4;vertical-align:top;text-align:left}
+thead th{position:sticky;top:0;background:#EEF2F5;color:var(--ink2);font-weight:600;z-index:2;white-space:nowrap}
+thead tr:nth-child(2) th{top:31px}
+thead th.g{text-align:center;background:#E2E9EF;color:var(--ink)}
+thead th.g.dv{background:#F3ECDF;color:var(--warn)}
+thead th.s{cursor:pointer}thead th.s:hover{color:var(--steel)}
+thead th .ar{color:var(--steel);margin-left:2px}
+td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.t{min-width:120px;max-width:210px}
+td.na{color:#A3ADB6;font-size:12px;text-align:center;white-space:nowrap}
+td.dv{background:#FDFAF4;color:#6E5A36}
+.stk{position:sticky;left:0;background:#fff;z-index:1;box-shadow:inset -1px 0 0 var(--rule)}
+thead .stk{z-index:3;background:#EEF2F5}
+tr.own td.stk{box-shadow:inset 3px 0 0 var(--own),inset -1px 0 0 var(--rule)}
+tbody tr:hover td{background:#F7FAFC}tbody tr:hover td.stk{background:#F7FAFC}
+.pn{font-weight:600;color:var(--steel);cursor:pointer;border:0;background:none;padding:0;font-size:13.5px;text-align:left}
+.pn:hover{text-decoration:underline}
+.tag{display:inline-block;font-size:11.5px;line-height:1.5;padding:0 5px;border-radius:3px;margin-right:4px;vertical-align:1px;background:#EEF2F5;color:var(--ink2)}
+.tag.own{background:var(--own);color:#fff;font-weight:600}
+.vsel{margin-top:4px;font-size:12px;padding:2px 4px;width:auto;max-width:190px}
+.muted{color:var(--mute);font-size:var(--fsS)}
+.b{font-weight:600}
+.pick{width:16px;height:16px;vertical-align:-3px}
+th.fld{background:#F6F8FA;color:var(--ink2);white-space:nowrap;position:sticky;left:0;z-index:1}
+tr.sec th,tr.sec td{background:#E2E9EF!important;color:var(--ink)}
+details.foot{margin-top:12px}details.foot summary{cursor:pointer;color:var(--ink2)}
+details.foot li{margin:3px 0;color:var(--ink2);font-size:13px}
+/* 详情抽屉 */
+#dr{position:fixed;inset:0;display:none;z-index:20}
+#dr.on{display:block}
+#dr .mask{position:absolute;inset:0;background:rgba(20,30,40,.35)}
+#dr .pnl{position:absolute;right:0;top:0;bottom:0;width:min(640px,100%);background:#fff;overflow:auto;padding:16px 18px 40px;box-shadow:-6px 0 20px rgba(0,0,0,.12)}
+#dr h2{font-size:17px;margin:0 30px 6px 0}#dr h3{font-size:14.5px;margin:18px 0 6px;color:var(--ink)}
+#dr .x{position:absolute;right:12px;top:10px;border:0;background:none;font-size:22px;color:var(--mute);line-height:1}
+#dr dl{display:grid;grid-template-columns:92px 1fr;gap:6px 10px;margin:0;font-size:13px}
+#dr dt{color:var(--ink2)}#dr dd{margin:0}
+#dr table{font-size:12.5px;width:100%}#dr td,#dr th{padding:4px 6px}
+#dr .yt{max-height:420px;overflow:auto;border:1px solid var(--rule);border-radius:4px}
+.dvbox{background:#FDFAF4;border:1px solid #EFE3CC;border-radius:5px;padding:8px 10px;font-size:13px}
+@media (max-width:560px){main{padding:10px 10px 30px}header h1{font-size:16px;flex:1}header .meta{order:3;flex-basis:100%}.grid{grid-template-columns:1fr 1fr}}
+</style></head>
+<body>
+<header><h1>快返年金同业对比</h1><div class="meta" id="meta"></div>
+ <button class="btn" id="xls">导出 Excel</button></header>
+<main>
+ <div class="card">
+  <div class="grid">
+   <div><label class="l" for="f-co">公司</label><select id="f-co"></select></div>
+   <div><label class="l" for="f-ch">渠道</label><select id="f-ch"></select></div>
+   <div><label class="l" for="f-des">分红/普通</label><select id="f-des"><option value="">全部</option><option value="分红">分红型</option><option value="普通">普通型（不分红）</option></select></div>
+   <div><label class="l" for="f-own">我司/同业</label><select id="f-own"><option value="">全部</option><option value="own">我司</option><option value="peer">同业</option></select></div>
+   <div><label class="l" for="f-q">搜索</label><input id="f-q" type="text" placeholder="产品名 / 关键字"></div>
+  </div>
+  <div class="row2">
+   <div class="grp"><label class="l">试算条件</label>
+    <select id="c-g" style="width:auto"><option>男</option><option>女</option></select>
+    <select id="c-a" style="width:auto"></select></div>
+   <div class="grp"><label class="l">交费期间（可多选）</label><div class="seg" id="c-t"></div></div>
+   <div class="grp"><label class="l">展示方式</label><div class="seg" id="v-mode">
+    <button data-v="row" aria-pressed="true">一行一款</button><button data-v="col" aria-pressed="false">一列一款</button></div></div>
+   <div class="grp"><label class="l">产品形态</label><div class="seg" id="v-shape">
+    <button data-s="1" aria-pressed="true">显示</button><button data-s="0" aria-pressed="false">收起</button></div></div>
+   <div class="grp"><label class="l">勾选对比</label><div class="seg"><button id="only" aria-pressed="false">只看勾选（0）</button><button id="clr">清空勾选</button></div></div>
+   <div class="grp"><button class="btn ghost" id="reset">重置全部</button></div>
+  </div>
+ </div>
+ <div class="hl" id="hl"></div>
+ <div class="wrap" id="tbl"></div>
+ <p class="muted" id="cnt" style="margin:6px 2px 0"></p>
+ <details class="foot"><summary>口径说明</summary><ul>
+  <li><b>保证返本年度</b>：退保所得（现价，含当日年金）加此前已领年金，首次不低于累计已交保费的保单年度。</li>
+  <li><b>保证IRR 至70岁</b>：持有到被保险人 70 周岁那个保单周年日退保；<b>至满期</b>：持有到保险期间届满，含满期金。均只算合同保证部分，不含红利；保费金额不影响结果。</li>
+  <li><b>含红利IRR（说明书演示）</b>：取各产品说明书里的官方投保案例（每款一个固定案例，年龄、交费期各不相同，不随上面的试算条件变化），红利按当年红利直接领取、不计利息计算；说明书按累积生息演示的（大都会、平安），取其「当年红利」列，未列示年度按相邻年度线性插值。红利不保证，仅供了解量级，不宜直接横比。</li>
+  <li><b>方案</b>：乐享丰年（保险期间×祝寿金）、盛世金越（领取期间）有多种方案，可在产品名下切换；盛世金越按最早起领建模。</li>
+  <li><b>空格原因</b>：「无此交费期」＝产品没有该交费期间；「超投保年龄」＝该年龄不能投保；「现价未公开」＝可投保但承保公司官网未公开该交费期间现价表（平安盛世金越仅公开趸交）。</li>
+  <li><b>数据来源</b>：各公司官网公开信息披露的条款、产品说明书、费率表、现金价值表（入口见各产品详情），逐年还原计算，并与说明书投保示例核对一致。上市日期取自在售产品清单，未在中保协产品库逐项复核。</li>
+ </ul></details>
+</main>
+<div id="dr"><div class="mask"></div><div class="pnl"><button class="x" aria-label="关闭">×</button><div id="drc"></div></div></div>
