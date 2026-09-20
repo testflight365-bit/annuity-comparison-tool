@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - '.github/workflows/deploy-simple.yml'
+      - '.deploy-simple/**'
   workflow_dispatch:
 permissions:
   contents: write
