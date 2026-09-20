@@ -1,0 +1,2 @@
+window.__ARCHIVE_OK=true;
+window.__ARCHIVE_FILES=["MSL-ANN-002_乐享丰年心享版_产品说明书.pdf", "MSL-ANN-002_乐享丰年心享版_费率表.pdf", "MSL-ANN-002_乐享丰年心享版_现金价值表.pdf", "AIA-ANN-004_永裕人生_产品说明书.pdf", "MET-ANN-001_都会乐享_条款.pdf", "MET-ANN-001_都会乐享_产品说明书.pdf", "MET-ANN-001_都会乐享_费率表.pdf", "MET-ANN-001_都会乐享_现金价值表.pdf", "MET-ANN-002_都会长盈_条款.pdf", "MET-ANN-002_都会长盈_产品说明书.pdf", "MET-ANN-002_都会长盈_费率表.pdf", "MET-ANN-002_都会长盈_现金价值表.pdf"];
