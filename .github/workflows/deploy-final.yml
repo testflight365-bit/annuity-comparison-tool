@@ -1,0 +1,111 @@
+name: deploy-final-package
+on:
+  push:
+    paths:
+      - '.github/workflows/deploy-final.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild exact index.html
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object index.html)" = "d155e4b470d12a7d9436a83ef9b8fb0c0535b6a4"
+          python - <<'PY'
+          from pathlib import Path
+          import base64, hashlib, json
+          old = Path("index.html").read_bytes()
+          p = json.loads(Path(".deploy/index.patch.json").read_text("utf-8"))
+          out = bytearray()
+          for op in p["ops"]:
+              if op[0] == "c":
+                  off, n = op[1], op[2]
+                  out += old[off:off+n]
+              elif op[0] == "l":
+                  out += base64.b64decode(op[1])
+              else:
+                  raise RuntimeError(f"unknown patch op: {op[0]}")
+          got = hashlib.sha256(out).hexdigest()
+          want = p["new_sha256"]
+          if got != want:
+              raise RuntimeError(f"index sha256 mismatch: {got} != {want}")
+          Path("index.html").write_bytes(out)
+          print("index.html", len(out), got)
+          PY
+          echo "41066c8f06b5bdf4b95b0fd7b30c83715d99fe61a64c4429d5cd404cb999da4e  index.html" | sha256sum -c -
+
+      - name: Download exact document package
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LANG=C.UTF-8
+          export LC_ALL=C.UTF-8
+          rm -rf 资料
+          mkdir -p 资料
+
+          fetch() {
+            url="$1"
+            out="$2"
+            sha="$3"
+            curl -L --fail --retry 4 --retry-delay 2 --connect-timeout 30 --max-time 300 -A "Mozilla/5.0" "$url" -o "$out"
+            echo "$sha  $out" | sha256sum -c -
+          }
+
+          fetch "https://www.aia.com.cn/content/dam/cn/zh-cn/docs/public-disclosure/brochure/B3184-1%E5%8F%8B%E9%82%A6%E6%B0%B8%E8%A3%95%E4%BA%BA%E7%94%9F%E5%B9%B4%E9%87%91%E4%BF%9D%E9%99%A9%EF%BC%88%E5%88%86%E7%BA%A2%E5%9E%8B%EF%BC%89%E7%9A%84%E4%BA%A7%E5%93%81%E8%AF%B4%E6%98%8E%E4%B9%A6.pdf" "资料/AIA-ANN-004_永裕人生_产品说明书.pdf" "640e488a9997dc12ed0f4f821572ffda4ecf958657448955f8ccab6c4548a4e1"
+
+          fetch "https://www.metlife.com.cn/strapi-uploads/assets/_fcb7f5bb94.pdf" "资料/MET-ANN-001_都会乐享_产品说明书.pdf" "8715781019d6282e12322c3e7d278e043bce2d6295cf92598a9939774734cffb"
+          fetch "https://www.metlife.com.cn/strapi-uploads/assets/_e5d54cae83.pdf" "资料/MET-ANN-001_都会乐享_条款.pdf" "77115fc2d072c85699798e54195aab69394c6e9f4fd2585671f93017e0f3b5c4"
+          fetch "https://www.metlife.com.cn/strapi-uploads/assets/_fc242ba68b.pdf" "资料/MET-ANN-001_都会乐享_现金价值表.pdf" "d693523218eb928beaa8df4659c21861a8a91eb5e84066bed518804e9823a977"
+          fetch "https://www.metlife.com.cn/strapi-uploads/assets/_73be66e7f4.pdf" "资料/MET-ANN-001_都会乐享_费率表.pdf" "91a37caeaf58770586c8d78fc5959a606d6f073751ac06f3be7644f2f4cc5bab"
+
+          fetch "https://www.metlife.com.cn/strapi-uploads/assets/_0f8f99a211.pdf" "资料/MET-ANN-002_都会长盈_产品说明书.pdf" "f7ed91946fa8aa4d646216b11d5e209173d6f079c1b4edaa0d8d3d42725e246f"
+          fetch "https://www.metlife.com.cn/strapi-uploads/assets/_d30c25b523.pdf" "资料/MET-ANN-002_都会长盈_条款.pdf" "6c6626b08171008417f9f26b8945c81948fe7b2e4900f2b2065a9513ed20204f"
+          fetch "https://www.metlife.com.cn/strapi-uploads/assets/_b90a4f8bd1.pdf" "资料/MET-ANN-002_都会长盈_现金价值表.pdf" "bc88456db5f92b3a915d60c58cd20bec126e273e8cb7a14cbd53c981c5bca10b"
+          fetch "https://www.metlife.com.cn/strapi-uploads/assets/_8f72a0bf63.pdf" "资料/MET-ANN-002_都会长盈_费率表.pdf" "16c1f732de5e1a7f7f122f20509e55121527407da902fb48cef97286d7d891aa"
+
+          fetch "https://www.manulife-sinochem.com/html/zh/static/attach/1756693085919/AOC-2025-070-package.zip" "/tmp/msl-package.zip" "6704617b9b4d2085e1d4e51ab43c53208e9bbe2ca14cfc2fffe402e263b6c072"
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+          mapping = {
+            "中宏乐享丰年心享版年金保险产品说明书.pdf": "资料/MSL-ANN-002_乐享丰年心享版_产品说明书.pdf",
+            "中宏乐享丰年心享版年金保险费率表.pdf": "资料/MSL-ANN-002_乐享丰年心享版_费率表.pdf",
+            "中宏乐享丰年心享版年金保险现金价值表.pdf": "资料/MSL-ANN-002_乐享丰年心享版_现金价值表.pdf",
+          }
+          with zipfile.ZipFile("/tmp/msl-package.zip") as z:
+              names = set(z.namelist())
+              for src, dst in mapping.items():
+                  if src not in names:
+                      raise RuntimeError(f"missing from MSL package: {src}")
+                  Path(dst).write_bytes(z.read(src))
+          PY
+          echo "98e27036023e14e451cd33b1a509e8163c15b21bf478da896cf5cb647774b059  资料/MSL-ANN-002_乐享丰年心享版_产品说明书.pdf" | sha256sum -c -
+          echo "c15064a38e4110118b517afdeca871899e46c609f7e50e06d52173bf6feece3e  资料/MSL-ANN-002_乐享丰年心享版_费率表.pdf" | sha256sum -c -
+          echo "0d4a1031f53f933e9ec722451a48194d24e6f2b9189fc01a530a90f431c7fd69  资料/MSL-ANN-002_乐享丰年心享版_现金价值表.pdf" | sha256sum -c -
+
+          cat > 资料/archive.js <<'EOF'
+window.__ARCHIVE_OK=true;
+window.__ARCHIVE_FILES=["MSL-ANN-002_乐享丰年心享版_产品说明书.pdf", "MSL-ANN-002_乐享丰年心享版_费率表.pdf", "MSL-ANN-002_乐享丰年心享版_现金价值表.pdf", "AIA-ANN-004_永裕人生_产品说明书.pdf", "MET-ANN-001_都会乐享_条款.pdf", "MET-ANN-001_都会乐享_产品说明书.pdf", "MET-ANN-001_都会乐享_费率表.pdf", "MET-ANN-001_都会乐享_现金价值表.pdf", "MET-ANN-002_都会长盈_条款.pdf", "MET-ANN-002_都会长盈_产品说明书.pdf", "MET-ANN-002_都会长盈_费率表.pdf", "MET-ANN-002_都会长盈_现金价值表.pdf"];
+EOF
+          echo "665a8d1326896d239ce5a68f748b4e96751f64c5887273e91ca9b7e4118b4f69  资料/archive.js" | sha256sum -c -
+
+      - name: Commit final deployment package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .deploy
+          rm -f .github/workflows/deploy-final.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Deploy complete annuity comparison package"
+          git push origin HEAD:main
