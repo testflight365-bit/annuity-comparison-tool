@@ -1,0 +1,58 @@
+name: deploy-simple-page
+on:
+  push:
+    paths:
+      - '.github/workflows/deploy-simple.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build, publish and verify simple page
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LANG=C.UTF-8
+          export LC_ALL=C.UTF-8
+
+          mkdir -p simple
+          cat .deploy-simple/parts/part*.txt > simple/index.html
+          echo "b021b2f4503b3bd666d38ea7e821e1cfb26a57a4afb385d7ab19482f1bce4ea2  simple/index.html" | sha256sum -c -
+
+          rm -rf .deploy-simple
+          rm -f .github/workflows/deploy-simple.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Publish simple annuity comparison page"
+          git push origin HEAD:main
+
+          python - <<'PY'
+          import hashlib,time
+          from urllib.request import Request,urlopen
+          url="https://testflight365-bit.github.io/annuity-comparison-tool/simple/"
+          want="b021b2f4503b3bd666d38ea7e821e1cfb26a57a4afb385d7ab19482f1bce4ea2"
+          last=None
+          for i in range(30):
+              try:
+                  req=Request(url,headers={"User-Agent":"Mozilla/5.0","Cache-Control":"no-cache"})
+                  with urlopen(req,timeout=60) as r:
+                      data=r.read()
+                      status=getattr(r,"status",200)
+                  got=hashlib.sha256(data).hexdigest()
+                  if status==200 and got==want:
+                      print("LIVE_OK",len(data),got,url)
+                      break
+                  last=f"status={status} sha={got} bytes={len(data)}"
+              except Exception as e:
+                  last=repr(e)
+              if i==29:
+                  raise RuntimeError("Pages verification failed: "+str(last))
+              time.sleep(5)
+          PY
