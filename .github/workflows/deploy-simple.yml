@@ -13,16 +13,33 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Build, publish and verify simple page
+      - name: Rebuild exact simple page and verify live Pages
         shell: bash
         run: |
           set -euo pipefail
-          export LANG=C.UTF-8
-          export LC_ALL=C.UTF-8
+          python - <<'PY'
+          from pathlib import Path
+          import re,json,hashlib
 
-          mkdir -p simple
-          cat .deploy-simple/parts/part*.txt > simple/index.html
-          echo "b021b2f4503b3bd666d38ea7e821e1cfb26a57a4afb385d7ab19482f1bce4ea2  simple/index.html" | sha256sum -c -
+          old=Path("index.html").read_text("utf-8")
+          m=re.search(r'<script id="d" type="application/json">(.*?)</script>',old,re.S)
+          if not m:
+              raise SystemExit("embedded JSON not found in root index.html")
+          obj=json.loads(m.group(1))
+          obj.pop("docs",None)
+          data=json.dumps(obj,ensure_ascii=False,separators=(",",":")).replace("</","<\\/")
+
+          prefix=Path(".deploy-simple/prefix.txt").read_text("utf-8")
+          suffix=Path(".deploy-simple/suffix.txt").read_text("utf-8")
+          out=prefix+'\n'+'<script id="d" type="application/json">'+data+'</script>'+'\n'+suffix
+          Path("simple").mkdir(exist_ok=True)
+          Path("simple/index.html").write_text(out,encoding="utf-8")
+          got=hashlib.sha256(out.encode("utf-8")).hexdigest()
+          want="b021b2f4503b3bd666d38ea7e821e1cfb26a57a4afb385d7ab19482f1bce4ea2"
+          if got!=want:
+              raise SystemExit(f"rebuild sha mismatch: {got}")
+          print("REBUILD_OK",len(out.encode("utf-8")),got)
+          PY
 
           rm -rf .deploy-simple
           rm -f .github/workflows/deploy-simple.yml
@@ -39,7 +56,7 @@ jobs:
           url="https://testflight365-bit.github.io/annuity-comparison-tool/simple/"
           want="b021b2f4503b3bd666d38ea7e821e1cfb26a57a4afb385d7ab19482f1bce4ea2"
           last=None
-          for i in range(30):
+          for i in range(36):
               try:
                   req=Request(url,headers={"User-Agent":"Mozilla/5.0","Cache-Control":"no-cache"})
                   with urlopen(req,timeout=60) as r:
@@ -52,7 +69,7 @@ jobs:
                   last=f"status={status} sha={got} bytes={len(data)}"
               except Exception as e:
                   last=repr(e)
-              if i==29:
+              if i==35:
                   raise RuntimeError("Pages verification failed: "+str(last))
               time.sleep(5)
           PY
