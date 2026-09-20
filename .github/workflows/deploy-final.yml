@@ -92,10 +92,10 @@ jobs:
           echo "c15064a38e4110118b517afdeca871899e46c609f7e50e06d52173bf6feece3e  资料/MSL-ANN-002_乐享丰年心享版_费率表.pdf" | sha256sum -c -
           echo "0d4a1031f53f933e9ec722451a48194d24e6f2b9189fc01a530a90f431c7fd69  资料/MSL-ANN-002_乐享丰年心享版_现金价值表.pdf" | sha256sum -c -
 
-          cat > 资料/archive.js <<'EOF'
-window.__ARCHIVE_OK=true;
-window.__ARCHIVE_FILES=["MSL-ANN-002_乐享丰年心享版_产品说明书.pdf", "MSL-ANN-002_乐享丰年心享版_费率表.pdf", "MSL-ANN-002_乐享丰年心享版_现金价值表.pdf", "AIA-ANN-004_永裕人生_产品说明书.pdf", "MET-ANN-001_都会乐享_条款.pdf", "MET-ANN-001_都会乐享_产品说明书.pdf", "MET-ANN-001_都会乐享_费率表.pdf", "MET-ANN-001_都会乐享_现金价值表.pdf", "MET-ANN-002_都会长盈_条款.pdf", "MET-ANN-002_都会长盈_产品说明书.pdf", "MET-ANN-002_都会长盈_费率表.pdf", "MET-ANN-002_都会长盈_现金价值表.pdf"];
-EOF
+          printf '%s\n' \
+            'window.__ARCHIVE_OK=true;' \
+            'window.__ARCHIVE_FILES=["MSL-ANN-002_乐享丰年心享版_产品说明书.pdf", "MSL-ANN-002_乐享丰年心享版_费率表.pdf", "MSL-ANN-002_乐享丰年心享版_现金价值表.pdf", "AIA-ANN-004_永裕人生_产品说明书.pdf", "MET-ANN-001_都会乐享_条款.pdf", "MET-ANN-001_都会乐享_产品说明书.pdf", "MET-ANN-001_都会乐享_费率表.pdf", "MET-ANN-001_都会乐享_现金价值表.pdf", "MET-ANN-002_都会长盈_条款.pdf", "MET-ANN-002_都会长盈_产品说明书.pdf", "MET-ANN-002_都会长盈_费率表.pdf", "MET-ANN-002_都会长盈_现金价值表.pdf"];' \
+            > 资料/archive.js
           echo "665a8d1326896d239ce5a68f748b4e96751f64c5887273e91ca9b7e4118b4f69  资料/archive.js" | sha256sum -c -
 
       - name: Commit final deployment package
