@@ -78,3 +78,5 @@ jobs:
                   raise RuntimeError("Pages verification failed: "+str(last))
               time.sleep(5)
           PY
+
+# trigger deployment
