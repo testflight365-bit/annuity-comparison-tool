@@ -1,0 +1,77 @@
+name: replace-root-full-version
+on:
+  push:
+    paths:
+      - '.github/workflows/replace-root-full.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Rebuild exact uploaded root file, publish and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LANG=C.UTF-8
+          export LC_ALL=C.UTF-8
+          python - <<'PY'
+          from pathlib import Path
+          import re,hashlib
+
+          old=Path("index.html").read_text("utf-8")
+          m=re.search(r'<script id="d" type="application/json">(.*?)</script>',old,re.S)
+          if not m:
+              raise SystemExit("embedded JSON block not found in current root index")
+
+          data=m.group(1)
+          prefix=Path(".deploy-root/prefix.txt").read_text("utf-8")
+          suffix=Path(".deploy-root/suffix.txt").read_text("utf-8")
+          out=prefix+'<script id="d" type="application/json">'+data+'</script>'+suffix
+
+          got=hashlib.sha256(out.encode("utf-8")).hexdigest()
+          want="f9a4ac8e2b2c0d88802590e048db254abc3d8748267e58adc1baf8f249841d25"
+          if got!=want:
+              raise SystemExit(f"SHA mismatch; refusing replacement. got={got}")
+
+          Path("index.html").write_text(out,encoding="utf-8")
+          print("REBUILD_OK",len(out.encode("utf-8")),got)
+          PY
+
+          rm -rf .deploy-root
+          rm -f .github/workflows/replace-root-full.yml
+          rm -f .github/workflows/inspect-root-json.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Replace full annuity comparison page"
+          git push origin HEAD:main
+
+          python - <<'PY'
+          import hashlib,time
+          from urllib.request import Request,urlopen
+          url="https://testflight365-bit.github.io/annuity-comparison-tool/"
+          want="f9a4ac8e2b2c0d88802590e048db254abc3d8748267e58adc1baf8f249841d25"
+          last=None
+          for i in range(36):
+              try:
+                  req=Request(url,headers={"User-Agent":"Mozilla/5.0","Cache-Control":"no-cache"})
+                  with urlopen(req,timeout=60) as r:
+                      data=r.read()
+                      status=getattr(r,"status",200)
+                  got=hashlib.sha256(data).hexdigest()
+                  if status==200 and got==want:
+                      print("LIVE_OK",len(data),got,url)
+                      break
+                  last=f"status={status} sha={got} bytes={len(data)}"
+              except Exception as e:
+                  last=repr(e)
+              if i==35:
+                  raise RuntimeError("Pages verification failed: "+str(last))
+              time.sleep(5)
+          PY
