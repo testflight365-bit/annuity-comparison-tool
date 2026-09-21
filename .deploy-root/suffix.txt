@@ -1,0 +1,1344 @@
+<script>
+const D=JSON.parse(document.getElementById('d').textContent);
+const P=D.products, byId=Object.fromEntries(P.map(p=>[p.product_id,p]));
+const fmt=n=>n==null||isNaN(n)?'—':Math.round(n).toLocaleString('zh-CN');
+const esc=s=>(s??'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const CLR0=['#1F5F8B','#A6432E','#2F6B4F','#7A5B9E','#B07A1F','#2A8A8A','#8A3F6B','#4F5B8F','#6B7A2F','#8F5A3A'];
+/* 颜色按需扩展：前10个用固定色板，超出后按色相轮转生成 */
+const CLR=new Proxy(CLR0,{get:(a,k)=>{const i=+k;
+ if(Number.isInteger(i)&&i>=a.length)return `hsl(${(i*137.5)%360} 45% 38%)`;return a[k];}});
+let cvN=0;for(const p in D.cv)for(const g in D.cv[p])for(const k in D.cv[p][g])cvN+=D.cv[p][g][k].length;
+document.getElementById('hdr').textContent=
+ `${P.length} 款产品 · ${[...new Set(P.map(p=>p.company_code))].length} 家公司 · ${cvN.toLocaleString()} 条现金价值记录 · 与官方说明书利益演示逐点核对一致`;
+
+let PICK=[];   /* 筛选框选中的产品白名单，空表示不限 */
+function filtered(){
+ return P.filter(p=>!PICK.length||PICK.includes(p.product_id));
+}
+function refresh(){const f=filtered();
+ renderSum(f);renderList(f);calcUI(f);}
+
+/* ============ 筛选框 ============ */
+/* 公司 / 中资外资 / 渠道 / 分红普通 / 产品(可多选,含全选) 五个条件组合过滤，全部为空=不限。
+   筛选结果实时联动下方的要素对比、案例摘要、各产品明细与说明书演示。 */
+const FILT={co:'',fund:'',ch:'',des:'',prods:[],prodOpen:false};
+/* 公司性质：友邦为外资独资，中宏、大都会为中外合资，均归入外资；日后入库中资公司产品时在此登记 */
+const FUND={AIA:'外资',MSL:'外资',MET:'外资',PA:'中资'};
+const fundOf=p=>FUND[p.company_code]||'外资';
+function filtMatch(p){
+ return (!FILT.co||p.company_code===FILT.co)
+  &&(!FILT.fund||fundOf(p)===FILT.fund)
+  &&(!FILT.ch||p.channel===FILT.ch)
+  &&(!FILT.des||(FILT.des==='分红'?p.design_type==='分红型':p.design_type!=='分红型'))
+  &&(!FILT.prods.length||FILT.prods.includes(p.product_id));
+}
+function filtBar(){
+ const opt=(v,t,cur)=>`<option value="${esc(v)}"${v===cur?' selected':''}>${esc(t)}</option>`;
+ const cos=[...new Set(P.map(p=>p.company_code))];
+ const chs=[...new Set(P.map(p=>p.channel))];
+ const n=P.filter(filtMatch).length, selN=FILT.prods.length;
+ const sumTxt=!selN?'全部（不限）':`已选 ${selN} 款`;
+ return `<div class="card"><label>筛选 <span class="src">（公司、渠道等条件可组合使用，下方各表实时联动；当前符合 ${n} 款）</span></label>
+  <div class="grid">
+   <div><label for="f-co">公司</label><select id="f-co">${opt('','全部',FILT.co)}${cos.map(c=>opt(c,CO[c]||c,FILT.co)).join('')}</select></div>
+   <div><label for="f-fund">中资/外资</label><select id="f-fund">${opt('','全部',FILT.fund)}${opt('中资','中资',FILT.fund)}${opt('外资','外资（含合资）',FILT.fund)}</select></div>
+   <div><label for="f-ch">渠道</label><select id="f-ch">${opt('','全部',FILT.ch)}${chs.map(c=>opt(c,c,FILT.ch)).join('')}</select></div>
+   <div><label for="f-des">分红/普通</label><select id="f-des">${opt('','全部',FILT.des)}${opt('分红','分红型',FILT.des)}${opt('普通','普通型',FILT.des)}</select></div>
+   <div><label>产品（可多选）</label>
+    <details class="fdrop" id="f-prod-dd"${FILT.prodOpen?' open':''}><summary>${sumTxt}</summary>
+     <div class="fpanel">
+      <label><input type="checkbox" id="f-prod-all"${selN&&selN===P.length?' checked':''}> <b>全选</b>（全部 ${P.length} 款）</label>
+      ${P.map(p=>`<label><input type="checkbox" class="f-prod-cb" value="${p.product_id}"${FILT.prods.includes(p.product_id)?' checked':''}> ${esc((CO[p.company_code]||p.company_code)+' '+(p.short_name||p.product_name))}</label>`).join('')}
+     </div></details></div>
+  </div>
+  <label style="margin-top:8px;display:block">快捷对比 <span class="src">（点一下选中对应的几款，再点一下取消；默认不选，即显示全部）</span></label>
+  <div class="chips" id="f-quick">${quickSets().map((q,i)=>`<button data-q="${i}" aria-pressed="${FILT.prods.length===q.ids.length&&q.ids.every(x=>FILT.prods.includes(x))}">${esc(q.name)}</button>`).join('')}
+   <button id="l-clear" style="border-style:dashed;color:var(--steel)">清除筛选</button></div></div>`;
+}
+/* 快捷对比：把「我司 vs 同业」「同公司同渠道」这几种最常用的比法固化成一键选择，
+   点一下等价于在「产品（可多选）」里勾出对应的几款 */
+function quickSets(){
+ const byCoCh=(co,ch)=>P.filter(p=>p.company_code===co&&p.channel===ch).map(p=>p.product_id);
+ const s=[], ownAll=P.filter(isOwn).map(p=>p.product_id);
+ const ownBank=byCoCh(OWN,'银保'), ownAgent=byCoCh(OWN,'个险代理人');
+ const peerBank=P.filter(p=>!isOwn(p)&&p.channel==='银保').map(p=>p.product_id);
+ const peerAgent=P.filter(p=>!isOwn(p)&&p.channel==='个险代理人').map(p=>p.product_id);
+ if(ownBank.length&&peerBank.length)s.push({name:'我司银保 vs 同业银保',ids:ownBank.concat(peerBank),own:1});
+ if(ownAgent.length&&peerAgent.length)s.push({name:'我司个险 vs 同业个险',ids:ownAgent.concat(peerAgent),own:1});
+ if(ownAll.length>1)s.push({name:'我司两款横比',ids:ownAll,own:1});
+ /* 同形态对标：都会乐享与平安盛世金越都是「每年领一整个基本保额、身故扣已领」，是最直接的对手；
+    平安官网只公开了趸交现价，所以这组一键切到趸交 */
+ const lx=P.find(p=>p.product_id==='MET-ANN-001'), sj=P.find(p=>p.product_id==='PA-ANN-001');
+ if(lx&&sj)s.push({name:'都会乐享 vs 平安盛世金越（同形态·趸交）',ids:[lx.product_id,sj.product_id],own:1,t:0});
+ [...new Set(P.map(p=>p.company_code))].forEach(co=>['个险代理人','银保'].forEach(ch=>{
+   const ids=byCoCh(co,ch);
+   if(ids.length>1)s.push({name:(CO[co]||co)+(ch==='银保'?'银保':'个险')+'内部（'+ids.length+'款）',ids,own:co===OWN});}));
+ return s;
+}
+function bindFilt(){
+ document.querySelectorAll('#f-quick button[data-q]').forEach(b=>b.onclick=()=>{
+  const q=quickSets()[+b.dataset.q], ids=q.ids;
+  const same=FILT.prods.length===ids.length&&ids.every(x=>FILT.prods.includes(x));
+  FILT.prods=same?[]:ids.slice();
+  if(!same&&q.t!=null)CASE.t=q.t;
+  FILT.co=FILT.fund=FILT.ch=FILT.des='';
+  applyFilt();});
+ const m={'f-co':'co','f-fund':'fund','f-ch':'ch','f-des':'des'};
+ Object.keys(m).forEach(id=>{const s=document.getElementById(id);
+  if(s)s.onchange=()=>{FILT[m[id]]=s.value;applyFilt();};});
+ const dd=document.getElementById('f-prod-dd');
+ if(dd){
+  dd.addEventListener('toggle',()=>{FILT.prodOpen=dd.open;});
+  const cbs=[...dd.querySelectorAll('.f-prod-cb')];
+  const all=document.getElementById('f-prod-all');
+  if(all)all.onchange=()=>{FILT.prods=all.checked?cbs.map(c=>c.value):[];FILT.prodOpen=true;applyFilt();};
+  cbs.forEach(c=>c.onchange=()=>{
+   FILT.prods=cbs.filter(x=>x.checked).map(x=>x.value);
+   FILT.prodOpen=true;applyFilt();});
+ }
+ const c=document.getElementById('l-clear');
+ if(c)c.onclick=()=>{FILT.co=FILT.fund=FILT.ch=FILT.des='';FILT.prods=[];applyFilt();};
+}
+function applyFilt(){
+ const active=FILT.co||FILT.fund||FILT.ch||FILT.des||FILT.prods.length;
+ PICK=active?P.filter(filtMatch).map(p=>p.product_id):[];
+ refresh();
+}
+
+/* ============ 字段 ============ */
+const INDUSTRY_DB='https://www.iachina.cn/art/2017/6/29/art_71_45682.html';
+const LAUNCH_VERIFIED='2026-09-17';
+const FIELDS=[['company','承保公司'],['product_name','产品全称'],['channel','销售渠道'],
+ ['launch_date','上市日期'],['product_type','产品类型'],['design_type','设计类型'],
+ ['dividend_method','红利分配方式'],
+ ['entry_age_min','投保年龄下限'],['entry_age_max_years','投保年龄上限'],
+ ['policy_terms','保险期间'],['payment_terms','交费期间'],['annuity_start','年金起领时点'],['special_survival_benefit','特别年金'],
+ ['survival_benefit','年金'],['maturity_benefit','满期金'],['death_benefit','身故保险金'],
+ ['cv_vs_premium_pattern','现价与保费关系'],['cv_breakeven_year_range','现价回本年度'],
+ ['cv_ratio_terminal','期末现价/累计保费'],['other_benefit','其他约定'],
+ ['value_added_service','增值服务'],['universal_account','是否可搭配万能'],
+ ['rate_basis','费率表口径'],['cash_value_basis','现价表口径'],
+ ['min_premium','起售门槛'],['commission','佣金']];
+function cleanText(v){return (v??'').toString().replace(/<\/?b>/gi,'')
+ .replace(/,/g,'，').replace(/;/g,'；').replace(/\|/g,'；')
+ .replace(/:/g,'：').replace(/\(/g,'（').replace(/\)/g,'）').replace(/\s+与\s+/g,' 与 ');}
+function annuityStartText(v){return cleanText(v)
+ .replace(/[，；]?至期满日（含）/g,'').replace(/[，；]?直至期满日（含）/g,'');}
+function maturityText(v){return cleanText(v)
+ .replace(/（保险期间届满合同终止；?期满(?:日|当年)仍给付(?:当年)?(?:生存)?年金(?:，现价为0)?）/g,'')
+ .replace(/[，；]?合同终止$/g,'');}
+function deathText(v){let s=cleanText(v)
+ .replace(/（当年度末未领取生存利益前的金额）/g,'')
+ .replace(/（无分期月数比例条款，口径比前两款简单）/g,'');
+ const m=s.match(/^(.+?)\s+与\s+(.+?)\s+的较大者(.*)$/);
+ if(!m)return s;
+ const trim=x=>x.trim().replace(/^（(.*)）$/,'$1');
+ let a=trim(m[1]),b=trim(m[2]);
+ if(a.includes('现金价值')&&!b.includes('现金价值'))[a,b]=[b,a];
+ return `max（${a}，${b}）${m[3]}`;
+}
+const CVBE={"AIA-ANN-001": {"pure": "第 10~44 年（随交费期间与投保年龄变动）", "all": "第 10~15 年（随交费期间与投保年龄变动）"}, "AIA-ANN-002": {"pure": "第 34~103 年（随交费期间与投保年龄变动）", "all": "第 13~40 年（随交费期间与投保年龄变动）"}, "AIA-ANN-003": {"pure": "第 5~7 年（随交费期间与投保年龄变动）", "all": "第 5~7 年（随交费期间与投保年龄变动）"}, "MSL-ANN-001": {"pure": "第 5~15 年（随交费期间与投保年龄变动）", "all": "第 5~15 年（随交费期间与投保年龄变动）"}, "MSL-ANN-002": {"pure": "第 4~50 年（1324/3448 个组合到期仍不回本）", "all": "第 4~16 年（随交费期间与投保年龄变动）"}, "AIA-ANN-004": {"pure": "第 7~8 年（随交费期间与投保年龄变动）", "all": "第 7~8 年（随交费期间与投保年龄变动）"}, "MET-ANN-001": {"pure": "全部组合到期均不回本", "all": "第 11~36 年（随交费期间与投保年龄变动）"}, "MET-ANN-002": {"pure": "第 5~6 年（随交费期间与投保年龄变动）", "all": "第 5~6 年（随交费期间与投保年龄变动）"}};
+/* 两种口径都由全部可售组合（性别×交费期间×投保年龄×方案）逐一试算得出：
+   现价单独＝当年现价（各公司口径已统一为含当日给付）首次追平累计已交保费的年度；
+   现价＋已领年金＝再加上此前已领的年金后首次追平的年度。 */
+function cvBreakdown(p){
+ const b=CVBE[p.product_id];
+ return b?{pure:b.pure,all:b.all}:{pure:'—',all:'—'};
+}
+function val(p,k){let v=p[k];
+ if(k==='special_survival_benefit'&&v==='无')return '无';
+ if(!v)return '<span class="na">未采集</span>';
+ if(k==='launch_date')return `<a href="${INDUSTRY_DB}" target="_blank" rel="noopener">${esc(v)}</a><br><span class="src">来源：在售产品清单截图 ${LAUNCH_VERIFIED}，可点击到中保协产品库核对</span>`;
+ if(k==='entry_age_min')return v+(p.entry_age_min_unit||'');
+ if(k==='entry_age_max_years')return v+'周岁';
+ if(k==='annuity_start')return esc(annuityStartText(v));
+ if(k==='survival_benefit')return esc(annuityStartText(v));
+ if(k==='maturity_benefit')return esc(maturityText(v));
+ if(k==='death_benefit')return esc(deathText(v));
+ if(k==='cv_breakeven_year_range'){const b=cvBreakdown(p);return `<b>现价单独：</b>${b.pure}<br><b>现价＋已领年金：</b>${b.all}`;}
+ if(k==='payment_terms'){   /* 每个交别单独一行，方便纵向扫读；尾部「分期可年/半年/季/月交」说明降为灰色小字 */
+  const parts=v.split('|').map(s=>esc(cleanText(s)));let note='';
+  const m=parts[parts.length-1].match(/^(.*?)（(.+)）$/);
+  if(m){parts[parts.length-1]=m[1];note=`<br><span class="src">${m[2]}</span>`;}
+  return parts.join('<br>')+note;}
+ return esc(cleanText(v));}
+
+/* ============ 核心算法 ============ */
+const KEY=(t,a,v)=>t+'|'+a+(v?'|'+v:'');
+/* 有「方案」维度的产品(如乐享丰年：保险期间×祝寿金)，费率/现价按 交费期间|投保年龄|方案 取数。
+   cv_unit=基本保额：现价表为每1000元基本保额口径，按该组合费率(每1000元保费对应保额)折回每1000元保费口径，
+   这样存档数据与官方表逐字一致，换算只在计算时发生。 */
+function avail(pid,g,t,a,v){const k=KEY(t,a,v);const r=D.rate[pid]?.[g]?.[k];let c=D.cv[pid]?.[g]?.[k];
+ if(!(r&&c))return null;
+ if(byId[pid]?.cv_unit==='基本保额')c=c.map(x=>x*r/1000);
+ return {rate:r,cv:c};}
+/* 方案：产品的 variants 列表(code/label/可选性别)，当前选择存于 VAR；无 variants 的产品返回 undefined */
+const VAR={};
+function variantsOf(pid,g){const vs=byId[pid]?.variants;if(!vs)return null;
+ return vs.filter(x=>!x.genders||x.genders.includes(g));}
+function varOf(pid,g){const vs=variantsOf(pid,g);if(!vs)return undefined;
+ if(!vs.some(x=>x.code===VAR[pid]))VAR[pid]=byId[pid].default_variant||vs[0].code;return VAR[pid];}
+function varLabel(pid,v){return (byId[pid]?.variants||[]).find(x=>x.code===v)?.label||'';}
+const demoList=id=>{const d=D.demo[id];return !d?[]:Array.isArray(d)?d:[d];};
+/* 责任规则驱动的取值：base含"保额"取SA，否则取当期累计已交保费cum */
+function baseVal(base,SA,cum){return (base||'').includes('保额')?SA:cum;}
+
+/* 年金/特别年金：从责任规则表逐条匹配当前交费期间(payment_term_filter留空=通用)、
+   起领年度、周期(period_years，缺省1年)、末年是否排除(exclude_final_year)、
+   以及age_threshold前后两档费率。同一年可能命中多条规则(如永裕的年金+特别年金)，累加。 */
+/* 祝寿金(乐享丰年可选责任)：按到达年龄 start_age~end_age 给付，仅在所选方案含对应起领年龄(variant_filter)时生效；
+   与年金分开返回，逐年表可单列，身故金扣减时一并计入已领。 */
+function benefitOf(pid,n,a,last,t,SA,cum,v){
+ const rules=(D.rules||[]).filter(r=>r.product_id===pid&&(r.rule_type==='年金'||r.rule_type==='特别年金'||r.rule_type==='祝寿金'));
+ let amt=0,zs=0;
+ for(const r of rules){
+   const pf=r.payment_term_filter;
+   if(pf!==''&&pf!=null&&+pf!==t)continue;
+   if(r.variant_filter&&!(v||'').split('-').includes(r.variant_filter))continue;
+   if(r.start_age&&a+n<+r.start_age)continue;
+   if(r.end_age&&a+n>+r.end_age)continue;
+   const sy=+r.start_year||1, period=+r.period_years||1;
+   if(n<sy||(n-sy)%period!==0)continue;
+   if(r.end_year&&n>+r.end_year)continue;
+   if(r.exclude_final_year==='是'&&n===last)continue;
+   const rate=(r.age_threshold&&(a+n)>+r.age_threshold)?+r.rate_after_threshold:+r.rate;
+   if(r.rule_type==='祝寿金')zs+=rate*baseVal(r.base,SA,cum);else amt+=rate*baseVal(r.base,SA,cum);
+ }
+ return {ann:amt,zs};
+}
+/* 满期金：责任规则表里唯一一条"满期金"行决定计价基础(基本保额 或 累计已交保费)；比例为0＝无满期金(如乐享丰年) */
+function maturityOf(pid,SA,cumFinal){
+ const r=(D.rules||[]).find(x=>x.product_id===pid&&x.rule_type==='满期金');
+ if(!r)return cumFinal;
+ return (r.rate===''||r.rate==null?1:+r.rate)*baseVal(r.base,SA,cumFinal);
+}
+/* 现价表口径两种：
+   含当期给付(友邦)：表列值已含当年年金/满期金，退保可得＝表列值；
+   不含当期给付(中宏，cv_excludes_benefit=是)：表列值是周年日给付之后的现价，
+   当日还会另外领到年金/满期金，故退保可得 cvS＝表列值＋当日年金＋(末年)满期金。
+   逐年表"现金价值"列始终显示官方表列值，打平/IRR 一律用 cvS。 */
+function cvExcl(pid){return byId[pid]?.cv_excludes_benefit==='是';}
+/* 身故金两种口径：默认 max(现价含当日给付, 累计已交保费)；
+   death_net_paid=是(乐享丰年)：max(现价含当日给付, 累计已交保费−此前已领生存年金与祝寿金)，与说明书演示逐行一致。 */
+function project(pid,g,t,a,prem,div,v){
+ const av=avail(pid,g,t,a,v); if(!av||!prem)return null;
+ const k=prem/1000, SA=av.rate*k, last=av.cv.length-1, rows=[], ex=cvExcl(pid), dn=byId[pid]?.death_net_paid==='是';
+ const mat=maturityOf(pid,SA,t===0?prem:Math.min(last,t)*prem);
+ let cumA=0,cumD=0;
+ for(let n=1;n<=last;n++){
+   const cum=t===0?prem:Math.min(n,t)*prem;
+   const b=benefitOf(pid,n,a,last,t,SA,cum,v), ann=b.ann+b.zs;
+   const cvn=av.cv[n]*k, d=div?(div[n-1]||0):0;
+   const fim=byId[pid]?.cv_final_includes_maturity==='是';
+   const cvS=ex?cvn+ann+(n===last&&!fim?mat:0):cvn;
+   const prevA=cumA; cumA+=ann; cumD+=d;
+   rows.push({n,age:a+n,cum,ann,zs:b.zs,mat:n===last?mat:0,cumA,cv:cvn,cvS,div:d,cumD,
+     death:dn?Math.max(cvS,cum-prevA):Math.max(cvS,cum),tot:cvS+cumA-ann,totD:cvS+cumA-ann+cumD});
+ }
+ return {SA,last,rows,term:t,prem,ex,v};
+}
+/* 现金流：t=0..term-1 交保费；t=5..n-1 领年金(+红利)；t=n 退保拿现价(含当年年金) */
+function irr(pj,n,withDiv){
+ const f=[],t=pj.term;
+ for(let i=0;i<=n;i++)f.push(0);
+ for(let i=0;i<(t===0?1:t);i++)if(i<=n)f[i]-=pj.prem;
+ pj.rows.forEach(r=>{if(r.n<n)f[r.n]+=r.ann; if(withDiv&&r.n<=n)f[r.n]+=r.div;});
+ f[n]+=pj.rows[n-1].cvS;
+ const npv=x=>f.reduce((s,c,i)=>s+c/Math.pow(1+x,i),0);
+ let lo=-0.9,hi=1;
+ if(npv(lo)*npv(hi)>0)return null;
+ for(let i=0;i<200;i++){const m=(lo+hi)/2;(npv(lo)*npv(m)<=0?hi=m:lo=m);}
+ return (lo+hi)/2;
+}
+/* 持有到期口径：不退保，只看累计已领年金（末年另加满期金）是否覆盖累计已交保费 */
+function beHold(pj,withDiv){
+ for(const r of pj.rows){
+   const got=r.cumA+r.mat+(withDiv?r.cumD:0);
+   if(got>=r.cum)return r.n;}
+ return null;
+}
+/* 退保口径 */
+function breakeven(pj,withDiv){
+ let c=0;for(const r of pj.rows){
+   const got=(withDiv?r.cvS+r.cumA-r.ann+r.cumD:r.cvS+r.cumA-r.ann);
+   if(got>=r.cum)return r.n;}
+ return null;
+}
+const irrTxt=v=>v==null?'—':(v*100).toFixed(2)+'%';
+const pct=r=>r?(+r*100).toFixed(2).replace(/\.?0+$/,'')+'%':'—';
+const forTerm=(r,t)=>r.payment_term_filter===''||r.payment_term_filter==null||+r.payment_term_filter===t;
+/* 年金起领年度：常规年金起领年度；若有更早的特别年金一并标出 */
+function zsTxt(pid,pj){const z=pj?.rows.find(r=>r.zs>0);if(!z)return null;
+ const r=(D.rules||[]).find(x=>x.product_id===pid&&x.rule_type==='祝寿金'&&(pj.v||'').split('-').includes(x.variant_filter));
+ return {z,r};}
+function annStartTxt(pid,t,pj){
+ const rr=(D.rules||[]).filter(r=>r.product_id===pid&&r.rule_type==='年金'&&forTerm(r,t));
+ if(!rr.length)return '—';
+ let s='第 '+rr[0].start_year+' 年';
+ const sp=(D.rules||[]).find(r=>r.product_id===pid&&r.rule_type==='特别年金'&&forTerm(r,t));
+ if(sp&&+sp.start_year<+rr[0].start_year)
+   s+='<br><span class="src">特别年金第 '+sp.start_year+(sp.end_year?'~'+sp.end_year:'')+' 年</span>';
+ const zt=zsTxt(pid,pj);
+ if(zt)s+='<br><span class="src">祝寿金第 '+zt.z.n+' 年（'+zt.z.age+'周岁）起</span>';
+ return s;
+}
+/* 首年起领金额 + 年龄分档 + 特别年金说明，各产品规则通用 */
+function annFirstTxt(pid,t,pj){
+ const n0=(D.rules||[]).filter(r=>r.product_id===pid&&r.rule_type==='年金'&&forTerm(r,t))[0];
+ if(!n0)return '—';
+ const sy=+n0.start_year, r0=pj.rows[sy-1]; if(!r0)return '—';
+ const b=(r,row)=>baseVal(r.base,pj.SA,row.cum);
+ const rt=(n0.age_threshold&&r0.age>+n0.age_threshold)?+n0.rate_after_threshold:+n0.rate;
+ let s=fmt(rt*b(n0,r0))+' /年';
+ if(n0.age_threshold)s+='<br><span class="src">'+n0.age_threshold+'周岁后 '+fmt(+n0.rate_after_threshold*b(n0,r0))+' /年</span>';
+ const sp=(D.rules||[]).find(r=>r.product_id===pid&&r.rule_type==='特别年金'&&forTerm(r,t));
+ if(sp){const rs=pj.rows[+sp.start_year-1]||r0, amt=fmt(+sp.rate*b(sp,rs));
+   if(+sp.period_years>1)s+='<br><span class="src">另每'+sp.period_years+'年(第'+sp.start_year+'年起)加发特别年金 '+amt+'</span>';
+   else if(sp.end_year)s+='<br><span class="src">另第'+sp.start_year+'~'+sp.end_year+'年各领特别年金 '+amt+'</span>';
+   else s+='<br><span class="src">另加特别年金 '+amt+'</span>';}
+ const zt=zsTxt(pid,pj);
+ if(zt)s+='<br><span class="src">另祝寿金 '+fmt(zt.z.zs)+' /年'+(zt.r?'（'+zt.r.start_age+'~'+zt.r.end_age+'周岁，累计已交保费×'+pct(zt.r.rate)+'）':'')+'</span>';
+ return s;
+}
+
+/* ============ 产品清单 ============ */
+/* 产品对比页布局：筛选框 → 案例摘要(试算条件) → 对比总表 → 各产品明细。
+   对比总表为竖向一张表(项目为行、产品为列)，三段合并：产品形态要素(差异行底色标出，可只看差异)
+   + 利益试算(同一套条件,保证利益,含现价峰值) + 说明书演示(各产品官方固定案例)。 */
+let DIFFONLY=false;
+let CMPH=false;   /* 对比总表方向：false=竖向（项目为行、产品为列），true=横向（产品为行、项目为列） */
+/* 横向展示：把已生成的竖表整体转置。整行表头（产品形态／利益试算／说明书演示等分段标题）
+   会作为前缀并入其下各项的列名，保证转置后每一列仍能看懂来自哪一段。 */
+function transposeCmp(){
+ const host=document.getElementById('l-cmp'); if(!host)return;
+ const tb=host.querySelector('table'); if(!tb)return;
+ const rows=[...tb.rows]; if(!rows.length)return;
+ const prods=[...rows[0].cells].slice(1).map(c=>c.innerHTML);
+ if(!prods.length)return;
+ let sec='', labels=[], data=[];
+ for(const r of rows.slice(1)){
+  const cells=[...r.cells];
+  if(cells.length<=1){sec=cells.length?cells[0].textContent.trim():'';continue;}
+  labels.push({t:(sec?sec+' · ':'')+cells[0].innerHTML,cls:r.className||''});
+  data.push(cells.slice(1).map(c=>c.innerHTML));
+ }
+ const w=140+labels.length*150;
+ host.innerHTML=`<div class="scroll lock"><table class="sum wide" style="min-width:${w}px">
+  <tr class="hd"><th>产品</th>${labels.map(l=>`<th class="${l.cls}">${l.t}</th>`).join('')}</tr>
+  ${prods.map((pn,i)=>`<tr><th>${pn}</th>${labels.map((l,j)=>`<td class="n ${l.cls}">${data[j][i]}</td>`).join('')}</tr>`).join('')}
+ </table></div>`;
+}
+/* 逐年利益随「案例摘要」的条件走；条件一改，各产品明细里的逐年表跟着刷新 */
+function yearsHTML(p,idx){
+ const v=varOf(p.product_id,SUMBASE.g);
+ const pj=project(p.product_id,SUMBASE.g,SUMBASE.t,SUMBASE.a,SUMBASE.prem||0,null,v);
+ return pj?yearTable({id:p.product_id,p,v,pj,isDemo:false},idx,false)
+  :`<div class="info">${esc(SUMBASE.g)} ${SUMBASE.a} 周岁 ${SUMBASE.t?SUMBASE.t+'年交':'趸交'} 这个组合${naWhy(p.product_id,SUMBASE.g,SUMBASE.t,SUMBASE.a)==='现价表未公开'
+   ?'该产品可以投保，但承保公司官网只公开了部分交费期间的现金价值表，这个交费期间无法试算。把「交费期间」切到可试算的档位再看（'+esc(p.short_name||'')+'：'+esc(avTerms(p.product_id))+'）'
+   :'该产品不可售，逐年利益无法计算'}。</div>`;}
+function avTerms(pid){const s=new Set();for(const g in D.cv[pid]||{})for(const k in D.cv[pid][g])s.add(+k.split('|')[0]);
+ return [...s].filter(t=>Object.keys(D.cv[pid]['男']||{}).filter(k=>+k.split('|')[0]===t).length>1).sort((a,b)=>a-b).map(t=>t?t+'年交':'趸交').join('、')||'无';}
+function renderYears(){
+ document.querySelectorAll('.yrs').forEach(d=>{
+   const p=byId[d.dataset.pid]; if(p)d.innerHTML=yearsHTML(p,+d.dataset.i);});
+ document.querySelectorAll('.dyrs').forEach(d=>{
+   const p=byId[d.dataset.pid]; if(p)d.innerHTML=demoYearsHTML(p);});}
+/* 产品说明书逐年利益：用该产品官方说明书上的固定案例（含红利列，如有）；
+   当前试算条件恰好命中某官方案例时优先用之，否则取该产品的第一个官方案例 */
+function demoYearsHTML(p){
+ const ds=demoList(p.product_id);
+ if(!ds.length)return '<div class="info">该产品没有入库的官方说明书演示。</div>';
+ const dm=ds.find(d=>d.gender===SUMBASE.g&&d.age===SUMBASE.a&&d.term===SUMBASE.t&&d.premium===SUMBASE.prem)||ds[0];
+ const hasDiv=Array.isArray(dm.div)&&dm.div.length;
+ const pj=project(p.product_id,dm.gender,dm.term,dm.age,dm.premium,hasDiv?dm.div:null,dm.variant);
+ return yearTable({id:p.product_id,p,v:dm.variant,pj,isDemo:hasDiv},0,hasDiv)
+  .replace('· 逐年利益</summary>','· 官方固定案例：'+esc(dm.gender)+' '+dm.age+' 周岁 · '
+   +(dm.term?dm.term+' 年交':'趸交')+' · '+(dm.term?'年交 ':'')+fmt(dm.premium)+' 元</summary>');
+}
+function renderList(F){
+ const el=document.getElementById('v-list');
+ if(!F.length){el.innerHTML='<h2>产品对比</h2>'+filtBar()+'<div class="card">没有符合筛选条件的产品。放宽筛选条件或点「清除筛选」再试。</div>';bindFilt();return;}
+ let h=filtBar()+`
+
+  <div id="l-calc"></div>
+
+  <h2>对比总表（产品形态 · 利益试算 · 说明书演示）</h2>
+  <p class="note">${F.length>1?'有差异的行以底色标出。':''}上市日期取自在售产品清单截图（${LAUNCH_VERIFIED}），<b>尚未逐项在官方产品库复核</b>；点击日期可打开<a href="${INDUSTRY_DB}" target="_blank" rel="noopener">中国保险行业协会人身保险产品信息库</a>自行查询。“未采集”＝已取得的官方资料均未披露，需内部资料补录。</p>
+  <div class="chips" style="margin-bottom:6px">
+   <button id="l-dir" aria-pressed="${CMPH}">${CMPH?'横向展示（产品为行）':'竖向展示（项目为行）'}</button>
+   ${F.length>1?`<button id="l-diff" aria-pressed="${DIFFONLY}">只看有差异的项</button>`:''}
+  </div>
+  <div id="l-cmp"></div>
+
+  <h2>各产品明细</h2><p class="note">每款产品依次是：可售组合、责任规则与官网公开资料、逐年利益（保证，按上面那套试算条件计算）、产品说明书逐年利益（官方固定案例，分红产品含红利列）。</p>`;
+ F.forEach((p,idx)=>{
+  const op=D.options.filter(o=>o.product_id===p.product_id);
+  const ru=D.rules.filter(r=>r.product_id===p.product_id);
+  const v=varOf(p.product_id,SUMBASE.g);
+  const pj=project(p.product_id,SUMBASE.g,SUMBASE.t,SUMBASE.a,SUMBASE.prem||0,null,v);
+  h+=`<div class="card"><h2 style="margin:0 0 6px">${ownTag(p)}${esc(p.product_name)}</h2>
+   <div style="margin-bottom:9px"><span class="tag">${esc(p.company)}</span><span class="tag">${esc(p.channel)}</span>
+   <span class="tag">${esc(p.design_type)}·${esc(p.dividend_method)}</span>${p.launch_date?`<span class="tag">上市 ${esc(p.launch_date)}</span>`:''}</div>
+   <h2 style="margin:4px 0 6px">产品资料</h2>
+   <details class="card"><summary style="color:${CLR[idx]}">${esc(p.product_name)} · 产品资料（可售组合、责任规则与官网入口）</summary>
+   <h2>可售组合</h2><div class="scroll lock"><table><tr><th>交费期间</th><th>投保年龄</th><th>保险期间</th><th>来源说明</th></tr>
+   ${op.map(o=>`<tr><td>${o.payment_term_type==='趸交'?'趸交':o.payment_term_years+'年交'}</td>
+     <td class="n">${o.entry_age_min||7}日 ~ ${o.entry_age_max_years}周岁</td>
+     <td>${o.product_id==='PA-ANN-001'?'至领取期间届满后的下一个保单周年日（领取期间 9/14/19/24/29 年或至 105 周岁）':'至'+o.policy_term_value+'周岁'}</td><td class="src">${esc(cleanText(o.source_ref))}</td></tr>`).join('')}</table></div>
+   <h2>责任规则</h2><div class="scroll lock"><table><tr><th>责任</th><th>计价基础</th><th class="n">比例</th><th>触发条件</th><th>出处</th></tr>
+   ${ru.map(r=>`<tr><td>${esc(r.rule_type)}</td><td>${esc(r.base)}</td>
+     <td class="n">${pct(r.rate)}</td>
+     <td>${esc(cleanText(r.condition))}</td><td class="src">${esc(cleanText(r.source_ref))}</td></tr>`).join('')}</table></div>
+   <h2>官网公开资料</h2>${docBlock(p.product_id)}
+   </details>
+   <h2>逐年利益（保证）</h2>
+   <div class="yrs" data-pid="${p.product_id}" data-i="${idx}">${yearsHTML(p,idx)}</div>
+   <h2>产品说明书逐年利益</h2>
+   <div class="dyrs" data-pid="${p.product_id}">${demoYearsHTML(p)}</div>
+   </div>`;});
+ el.innerHTML=h;
+ bindFilt();
+ const cb=document.getElementById('l-diff');
+ if(cb)cb.onclick=()=>{DIFFONLY=!DIFFONLY;cb.setAttribute('aria-pressed',DIFFONLY);runCalc();};
+ const dir=document.getElementById('l-dir');
+ if(dir)dir.onclick=()=>{CMPH=!CMPH;dir.setAttribute('aria-pressed',CMPH);
+   dir.textContent=CMPH?'横向展示（产品为行）':'竖向展示（项目为行）';runCalc();};
+}
+
+const CO={AIA:'友邦',MSL:'中宏',MET:'大都会',PA:'平安'};
+/* 本工具的使用方是中美联泰大都会人寿，MET 即「我司」，在各处加标记便于一眼分出自家与同业 */
+const OWN='MET';
+const isOwn=p=>p.company_code===OWN;
+const ownTag=p=>isOwn(p)?'<span class="own">我司</span>':'';
+const coName=p=>(CO[p.company_code]||'')+' ';
+const OFFICIAL={
+ AIA:['友邦人寿 公开信息披露 · 在售产品','https://www.aia.com.cn/zh-cn/gongkaixinxipilou/jibenxinxi/chanpinjibenxinxi/zaishouchanpin.chanpinjibenxinxi'],
+ MSL:['中宏保险 公开信息披露 · 产品基本信息','https://www.manulife-sinochem.com/business/public-information/basic/product1'],
+ MET:['大都会人寿官网 · 公开信息披露 · 在售产品','https://www.metlife.com.cn/information-disclosure/public-information-disclosure/basic-information/basic-product-information/available-products'],
+ PA:['平安人寿官网 · 公开信息披露 · 保险产品目录及条款','https://life.pingan.com/gongkaixinxipilu/baoxianchanpinmulujitiaokuan.jsp']};
+/* 原始资料不再随网页分发：条款、说明书、费率表、现金价值表均在各公司官网公开信息披露栏目，这里只给入口 */
+function docBlock(pid){const off=OFFICIAL[byId[pid]?.company_code];
+ return off?`<p style="margin:0"><a href="${off[1]}" target="_blank" rel="noopener">${off[0]}</a></p>
+  <p class="src" style="margin:4px 0 0">条款、产品说明书、费率表、现金价值表均在该入口公开，打开后按产品名称查找。本工具的全部数值即解析自这些文件；若官网版本已更新，数据需重新解析。</p>`
+ :'<p class="src" style="margin:0">该公司的官网公开信息披露入口尚未采集。</p>';}
+/* ============ 对比结论 ============ */
+const OWNPOS=`
+<h2>我司（中美联泰大都会）在同业中的位置</h2>
+<p class="note">以下用同一套条件（男 40 周岁、3 年交、每年 10 万；与平安对比时为趸交 30 万）把我司两款放回各自的渠道里看。想换条件横比，去「产品对比」页，用顶部的<b>筛选框</b>按公司、渠道等条件选中同渠道同业，再改「案例摘要」里的试算条件。</p>
+
+<div class="card"><h2 style="margin:0 0 6px"><span class="own">我司</span>银保 · 都会长盈 vs 友邦银保两款</h2>
+<div class="scroll lock"><table>
+<tr class="hd"><th>对比项</th><th class="n">都会长盈</th><th class="n">永裕优享版</th><th class="n">永裕人生</th></tr>
+<tr class="diff"><th>保证 IRR</th><td class="n"><b>1.60%</b></td><td class="n">1.59%</td><td class="n">1.59%</td></tr>
+<tr class="diff"><th>保证退保打平</th><td class="n"><b>第 5 年</b></td><td class="n">第 6 年</td><td class="n">第 7 年</td></tr>
+<tr><th>全期累计领取</th><td class="n">206%</td><td class="n">207%</td><td class="n">207%</td></tr>
+<tr class="diff"><th>投保年龄上限</th><td class="n"><b>80 周岁</b></td><td class="n">70 周岁</td><td class="n">70 周岁</td></tr>
+<tr><th>年金给付</th><td class="n">已交保费 1.75%/年<br><span class="src">交费期满另给一个基本保额</span></td><td class="n" colspan="2">已交保费 1.25%/年<br><span class="src">每满 5 年另给 2.6%</span></td></tr>
+<tr><th>到期给付</th><td class="n">全额退还已交保费</td><td class="n" colspan="2">给付一个基本保险金额<br><span class="src">约为已交保费的 103%</span></td></tr>
+</table></div>
+<p><b>我司的三个优势：</b>保证收益略高一线；<b>回本早 1~2 年</b>（特别生存金在交费期满当年就到账，友邦要等第一笔年金）；<b>投保年龄上限高 10 岁</b>，70~80 岁这一段在银保渠道里我司是独一家。</p>
+<p><b>我司的两个短板：</b>到期返还的是「已交保费」，友邦返还的是「基本保险金额」，后者约为已交保费的 103%，全期累计领取因此略低 1 个百分点；友邦的特别年金每满 5 年给一次，客户感知上有「阶段性惊喜」，我司是平铺的。</p>
+<p><b>销售落点：</b>对「怕被套住、要随时能退」和「岁数偏大」的客户，我司明显占优；对「只看到期能拿回多少」的客户，要主动把 1.75% 与 1.25%+2.6% 的年均口径算给客户看，否则容易被对方的「每 5 年多给一次」话术带走。</p></div>
+
+<div class="card"><h2 style="margin:0 0 6px"><span class="own">我司</span>个险 · 都会乐享 vs 同业个险（3 年交可比的五款）</h2>
+<div class="scroll lock"><table>
+<tr class="hd"><th>对比项</th><th class="n">都会乐享</th><th class="n">宏瑞年年</th><th class="n">乐享丰年</th><th class="n">恒曜</th><th class="n">金生荣耀</th></tr>
+<tr class="diff"><th>保证 IRR</th><td class="n"><b>1.42%</b></td><td class="n">1.80%</td><td class="n">1.68%</td><td class="n">1.49%</td><td class="n">1.54%</td></tr>
+<tr class="diff"><th>保证退保打平</th><td class="n"><b>第 20 年</b></td><td class="n">第 5 年</td><td class="n">第 6 年</td><td class="n">第 10 年</td><td class="n">第 23 年</td></tr>
+<tr class="diff"><th>70 周岁累计已领</th><td class="n"><b>67%</b></td><td class="n">50%</td><td class="n">76%</td><td class="n">33%</td><td class="n">34%</td></tr>
+<tr><th>全期累计领取</th><td class="n">157%</td><td class="n">220%</td><td class="n">163%</td><td class="n">204%</td><td class="n">208%</td></tr>
+</table></div>
+<p class="src">平安盛世金越官网只公开了趸交现价，3 年交无法试算，未列入本表；它和都会乐享是同一种形态，单独放在下一张卡按趸交对比。</p>
+<p><b>要正视的事实：</b>在这五款里，我司这一款<b>保证收益垫底、回本仅快过金生荣耀</b>。它是「本金摊还型」——每年给一整个基本保额看着厚，但现价一路降到 0、没有满期金，全期累计领取 157%，明显低于返本型的 204%~220%。</p>
+<p><b>我司的差异点在形态，不在收益：</b>它是「每年领一整个基本保额、一直领到 105 周岁」，可以改月领（每月 8.4%）。外资同业里没有对应产品，但<b>平安盛世金越是同一形态</b>（见下一张卡），这条赛道上我司的直接对手是平安。</p>
+<p><b>销售落点：</b>不要和宏瑞年年、乐享丰年正面比 IRR，会输。<b>正确的打法是先确认客户要的是「花掉的现金流」还是「留住的本金」</b>——要花掉的，我司这款和乐享丰年是同一赛道，再比领取节奏（我司月领、领到 105 岁 vs 乐享丰年保至 85/100 岁）；要留住本金的客户，本就不该推这一款。</p></div>
+
+<div class="card"><h2 style="margin:0 0 6px"><span class="own">我司</span>个险 · 都会乐享 vs 平安盛世金越至尊版26（同形态直接对手）</h2>
+<p class="note">两款都是个险分红、每年领一整个基本保额、月领 8.4%、身故金＝max（已交保费−已领年金，现价）。平安官网只公开了趸交现价，所以统一按<b>男 40 周岁、趸交 30 万</b>比；平安取「领取至 105 周岁」方案，与都会乐享对齐。</p>
+<div class="scroll lock"><table>
+<tr class="hd"><th>对比项</th><th class="n">都会乐享</th><th class="n">盛世金越至尊版26</th></tr>
+<tr class="diff"><th>每年领（基本保额）</th><td class="n"><b>8,067 元</b></td><td class="n">7,920 元</td></tr>
+<tr class="diff"><th>保证 IRR（持有到期）</th><td class="n"><b>1.53%</b></td><td class="n">1.47%</td></tr>
+<tr class="diff"><th>60 周岁投保 · 保证 IRR</th><td class="n"><b>1.48%</b></td><td class="n">1.38%</td></tr>
+<tr class="diff"><th>70 周岁投保 · 保证 IRR</th><td class="n"><b>1.43%</b></td><td class="n">1.29%</td></tr>
+<tr class="diff"><th>保证退保打平</th><td class="n">第 17 年</td><td class="n"><b>第 8 年</b></td></tr>
+<tr class="diff"><th>第 10 年末退保可拿回</th><td class="n">71%</td><td class="n"><b>95%</b></td></tr>
+<tr><th>70 周岁累计已领</th><td class="n">70%</td><td class="n">69%</td></tr>
+<tr><th>全期累计领取</th><td class="n">164%</td><td class="n">161%</td></tr>
+<tr class="diff"><th>满期金</th><td class="n">无</td><td class="n">一个基本保额（7,920 元）</td></tr>
+<tr class="diff"><th>领取期间</th><td class="n">固定至 105 周岁</td><td class="n"><b>9/14/19/24/29 年或至 105 周岁</b></td></tr>
+<tr class="diff"><th>开始领取</th><td class="n">固定第 5 个保单周年日</td><td class="n"><b>第 5 年（期交第 6 年且交满）起，最晚 90 周岁，投保时约定</b></td></tr>
+<tr><th>男女定价</th><td class="n">分男女</td><td class="n">男女同费率</td></tr>
+<tr class="diff"><th>现价表公开程度</th><td class="n"><b>各交费期间全公开</b></td><td class="n">只公开趸交</td></tr>
+</table></div>
+<p><b>我司赢在「领得多」</b>：同样 30 万趸交，每年多领约 1.9%，持有到期保证 IRR 高 0.06 个百分点；<b>年纪越大优势越明显</b>，60 岁投保高 0.10、70 岁投保高 0.14 个百分点。</p>
+<p><b>平安赢在「退得出、选得多」</b>：前期现价高得多，第 8 年退保就打平，我司要到第 17 年；领取期间和起领年龄都能按客户需要定，能做成「60 岁起领 19 年」这类养老补充方案，我司只有一种领法。</p>
+<p><b>销售落点：</b>客户确定长期持有、看重每年到手金额，尤其 55 岁以上，主推都会乐享，直接把每年领取金额和 IRR 摆出来比；客户担心中途要用钱，或想要「某个年龄起领固定若干年」，平安更占优，要把话题拉回「活多久领多久、领到 105 岁」这个我司的形态卖点，不要在流动性上硬碰。<b>产品侧建议</b>：评估前期现价曲线与领取期间可选，这是平安相对我司最明显的两处设计差异。</p></div>
+`;
+const MARKET=`
+<h2>市场总览：快返年金现在是什么样子</h2>
+<p class="note">下面这几条是把已入库的 9 款（4 家公司：友邦、中宏、大都会三家外资/合资，平安一家中资；约 59 万条现价记录）横着看出来的规律，不针对某一款产品。数值都是<b>保证利益</b>口径。</p>
+
+<div class="card"><h2 style="margin:0 0 6px">一、「快返」快的是<b>时点</b>，不是<b>收益</b></h2>
+<p>九款全部可以在<b>第 5~7 个保单周年日</b>开始给钱，最早的第 5 年，最晚的 5 年交也不过第 7 年，这条已经是行业标配，不构成差异。真正不同的是<b>那笔钱从哪来</b>，目前市场上有四种给法：</p>
+<ul>
+<li><b>按保费的固定比例给</b>（永裕两款 1.25%、宏瑞年年 2%、都会长盈 1.75%）：金额与投保年龄、性别无关，条款最好懂，客户一算就明白。</li>
+<li><b>按基本保额的固定比例给</b>（恒曜、金生荣耀 20%，乐享丰年 10%）：金额取决于保额，而保额由年龄决定，同样的保费不同年龄拿到的钱差很多。</li>
+<li><b>按基本保额全额给</b>（都会乐享、平安盛世金越 100%/年）：年金看着最厚，但保额本身被定价压得很低，本质是把本金按年摊还。平安还把<b>领取期间（9~29 年或至 105 岁）和起领年龄（最晚 90 岁）</b>做成可选，快返之外又能当定期养老金用。</li>
+<li><b>阶段性加码</b>（恒曜/金生荣耀 64 周岁后翻倍、宏瑞年年与永裕两款的特别年金、乐享丰年的祝寿金、都会长盈交费期满的一次性特别生存金）：把一部分利益后置或集中到某个时点。</li>
+</ul>
+<p><b>洞察：</b>前两年的产品竞赛集中在「第几年开始领」，现在已经卷到头了；新上市的几款（盛世金越 2026-03、都会长盈 2026-06、永裕人生 2026-06、金生荣耀 2026-07、恒曜 2026-08）转而在<b>给付节奏的设计</b>上做文章。跟客户讲「快返」已经没有说服力，讲「这笔钱是本金还是本金之外的钱」才有。</p></div>
+
+<div class="card"><h2 style="margin:0 0 6px">二、保证收益全部落在 1.4%~1.8% 这条窄带里</h2>
+<p>九款主力方案的保证 IRR（持有到期）区间是 <b>1.42%~1.80%</b>，整体不到 0.4 个百分点。<b>不分红的两款</b>（宏瑞年年 1.80%、乐享丰年 1.68%）站在带子顶端，<b>分红的七款</b>保证部分只有 1.42%~1.60%（平安盛世金越趸交至 105 岁 1.47%），普遍比不分红的低 0.1~0.4 个百分点。</p>
+<p>唯一跌出这条带子的是平安的<b>短领取期间方案</b>：领 9 年只有 0.85%、领 29 年 1.29%，官方说明书案例（6 年交、60 岁起领 19 年）保证 IRR 1.10%。领得越集中、越早领完，保证收益越低，这是用收益换「定期领完」。</p>
+<p>这是预定利率下调之后的必然结果：保证部分已经没有多少腾挪空间，各家把差异化让渡给了红利。友邦四款说明书演示的含红利 IRR 在 <b>2.67%~2.76%</b>，平安说明书案例按当年红利口径约 2.2%，看起来拉开了一大截，但那是演示、不是承诺。</p>
+<p><b>洞察：</b>在这条窄带里比小数点后两位意义不大——同一款产品换个交费期间，收益差异（最多 0.35 个百分点）就超过了产品之间的差异。<b>先把交费期间和投保年龄定下来，再比产品，顺序反了容易得出错误结论。</b></p></div>
+
+<div class="card"><h2 style="margin:0 0 6px">三、真正拉开差距的是现金价值曲线，不是收益率</h2>
+<p>九款的现价形态只有三种，决定了这笔钱中途能不能动、最后能不能留给下一代：</p>
+<ul>
+<li><b>本金留存型（6 款）</b>：现价长期稳在已交保费的 100% 上下，到期再返还一笔（按已交保费或按基本保额）。全程累计领取约为已交保费的 204%~220%。年金是本金之外多给的。</li>
+<li><b>本金摊还型（3 款：乐享丰年、都会乐享、平安盛世金越）</b>：现价见顶后一路下滑，<b>没有满期金或只剩一个基本保额</b>（平安，约为保费的 2.6%），身故金也随已领年金递减。全程累计领取 108%~213%。年金里有很大一块本来就是客户自己的本金。同一形态里前期现价差别很大：平安第 8 年就能退保打平，都会乐享要第 17 年。</li>
+<li><b>利益后置型（1 款：金生荣耀）</b>：虽然到期返还已交保费，但中途现价长期低于已交保费（第 10 年只有 66%），要到第 65 年才追平。</li>
+</ul>
+<p>可退保回本的年份从<b>第 5 年到第 23 年</b>，差了 18 年。同样是「保本型年金」，客户第 8 年想拿钱出来，有的产品全身而退，有的要亏一大截。</p>
+<p><b>洞察：</b>收益率差 0.4 个百分点，回本时间差 18 年——<b>流动性的差异比收益的差异大一个数量级</b>。客户说不准将来会不会动这笔钱时，这一条应该比 IRR 先问。</p></div>
+
+<div class="card"><h2 style="margin:0 0 6px">四、渠道决定了产品的复杂度</h2>
+<p><b>银保三款</b>（永裕优享版、永裕人生、都会长盈）不约而同选了最简单的结构：年金按已交保费的固定比例给、到期把本金原样退回、没有可选责任、交费期最多 3 档。</p>
+<p><b>个险六款</b>（恒曜、金生荣耀、宏瑞年年、乐享丰年、都会乐享、盛世金越）普遍更复杂：保额比例给付、64 周岁翻倍、祝寿金可选、保险期间或领取期间可选、交费期最多 6 档、年金还能改月领。</p>
+<p><b>洞察：</b>这是渠道决定的——银保柜面讲解时间短，必须一句话说清；个险有代理人做方案，复杂结构才有空间。所以<b>拿银保产品和个险产品直接比 IRR 是不公平的</b>，它们面对的客户和销售场景不同。</p></div>
+
+<div class="card"><h2 style="margin:0 0 6px">五、定价在趋同，条款在分化</h2>
+<p>收益已经比不出花样，各家转而在规则上做区隔，这些往往才是最后成交与否的关键：</p>
+<ul>
+<li><b>投保年龄上限</b>：友邦四款、都会乐享、平安盛世金越 70 周岁，中宏两款 75 周岁，都会长盈 <b>80 周岁</b>。70 岁以上的客户，九款里只有三款能投。</li>
+<li><b>减额交清</b>：九款里<b>只有宏瑞年年</b>可以。客户以后交不动保费时，其余八款只能退保或减保。</li>
+<li><b>领取频率</b>：宏瑞年年、都会乐享、盛世金越可改月领（全年合计多 0.8%~2%），其余只能年领。</li>
+<li><b>保险期间 / 领取期间可选</b>：乐享丰年能在 85 / 100 周岁之间选；平安盛世金越领取期间 6 档、起领年龄可约定到 90 岁，是九款里最灵活的；其余固定到 105 周岁。</li>
+<li><b>第二投保人</b>：中宏两款可指定，用于投保人身故后的保单传承。</li>
+<li><b>责任免除条数</b>：大都会两款各 3 条最宽松，友邦永裕两款和平安盛世金越 7 条最严（含毒品、酒驾等）。</li>
+<li><b>信息披露</b>：外资/合资三家各交费期间的现价表都在官网全量公开；平安只公开趸交现价，期交现价要靠说明书案例或销售系统，同业比较时平安的期交方案只能看个别案例。</li>
+</ul>
+<p><b>洞察：</b>这些条款差异在利益演示表上一个数字都看不出来，却直接决定「这单能不能做、日后好不好服务」。<b>做方案时先用规则筛掉不可能的，再在剩下的里面比收益。</b></p></div>
+
+<div class="card"><h2 style="margin:0 0 6px">六、两个容易被忽略的共性</h2>
+<p><b>男女同价是主流：</b>九款里七款男女保证 IRR 完全一致（差异不到 0.01 个百分点），只有大都会两款分性别定价，同样保费女性拿到的保额略低。给女性客户做方案时，只有这两款需要单独算一遍。</p>
+<p><b>交费期越长越吃亏：</b>从趸交改成最长交费期，保证 IRR 的损失：永裕两款 0、宏瑞年年 −0.04、恒曜 −0.05、乐享丰年 −0.15、金生荣耀 −0.22、都会乐享 −0.35。<b>凡是按基本保额给付的产品，拉长交费期损失都更大</b>，因为保额是按首年保费定的；按保费比例给付的产品则几乎不受影响。</p></div>
+`;
+const SUMTEXT=`
+<h2>结论</h2>
+<p class="note">下面的结论都是从已入库的官方费率表和现金价值表里算出来的。除特别说明外，都以<b>男 40 周岁、3 年交、每年 10 万元（共交 30 万）</b>为例——这是除平安外八款都能试算的条件；平安盛世金越官网只公开了趸交现价，它的数字<b>按趸交 30 万</b>算，并单独注明。文字部分固定讲全部 9 款，不随「产品对比」页的筛选变化；想按自己的条件横着比，去「产品对比」页改「案例摘要」里的条件。</p>
+<p class="note">先说清两个词：<b>保证 IRR</b> 可以理解成「这笔钱实际上一年赚百分之几」，只算合同白纸黑字写明、一定给的部分；<b>现金价值</b>就是「中途不想要了，退保能拿回多少钱」。</p>
+
+<h2>一句话认识这 9 款</h2>
+<p class="note">每一句按同一个顺序说：<b>什么渠道、分不分红 → 形态是什么 → 收益什么水平 → 适合谁</b>。</p>
+<div class="scroll lock"><table>
+<tr class="hd"><th>产品</th><th>一句话</th><th class="n">保证IRR</th><th class="n">保证<br>回本</th></tr>
+<tr><td>中宏<br><span class="src">宏瑞年年</span></td><td>个险、<b>不分红</b>。每年按已交保费 2% 给，另有两次特别年金，到期全额返本。保证收益 1.80%，九款里最高，而且年龄、交费期都不影响。<b>适合只认确定数字、可能中途要用钱、或年纪偏大的客户</b>；也是唯一能减额交清的。</td><td class="n">1.80%</td><td class="n">第 5 年</td></tr>
+<tr><td>中宏<br><span class="src">乐享丰年心享版</span></td><td>个险、<b>不分红</b>。每年按基本保额 10% 给，到期现价归零、没有满期金——本金是分批还给你的。保证收益 1.60%~1.71%，现金流属九款里最厚的一档。<b>适合要一笔确定能花掉的钱、且不打算把这笔钱留给下一代的客户</b>；年纪大了不划算。</td><td class="n">1.60%~1.71%</td><td class="n">第 6 年</td></tr>
+<tr><td>大都会<br><span class="src">银保 · 都会长盈</span></td><td>银保、<b>分红</b>。交费期满先一次性给一个基本保额，之后每年给已交保费 1.75%，到期全额返本，中途现价一直在 100% 以上。保证 1.60%，回本最快。<b>适合要「本金安全、中间有点零花、到期原样拿回」的客户，尤其 70~80 岁投不进别家的</b>。</td><td class="n">1.60%</td><td class="n">第 5 年</td></tr>
+<tr><td>友邦<br><span class="src">银保 · 永裕人生优享版</span></td><td>银保、<b>分红</b>。每年给已交保费 1.25%，每满 5 年多给一次 2.6%，到期给一个基本保额。保证 1.59%，是分红六款里保证部分最高、回本最快的，年龄和交费期都几乎不影响。<b>适合想要红利空间、又不愿在保证部分让步太多的客户</b>。</td><td class="n">1.59%</td><td class="n">第 6 年</td></tr>
+<tr><td>友邦<br><span class="src">银保 · 永裕人生</span></td><td>银保、<b>分红</b>。给付规则和优享版完全相同，只是前期现价略低、回本晚一年，保证同为 1.59%。<b>适合渠道上只能拿到这一款的客户</b>，利益上几乎没有损失；两款都能拿到时优先优享版。</td><td class="n">1.59%</td><td class="n">第 7 年</td></tr>
+<tr><td>友邦<br><span class="src">传世金生2026荣耀版</span></td><td>个险、<b>分红</b>。每年按基本保额 20% 给、64 岁后翻倍，到期返本，但中途现价长期低于已交保费，第 20 年退保还是亏的。保证 1.54%，交费期档位最全。<b>只适合确定几十年不动这笔钱的客户</b>，有中途退保可能的一律换恒曜。</td><td class="n">1.54%</td><td class="n">第 23 年</td></tr>
+<tr><td>友邦<br><span class="src">传世恒曜</span></td><td>个险、<b>分红</b>。规则与金生荣耀相同（20%、64 岁后翻倍、到期返本），但前期现价高得多，第 10 年就能回本。保证 1.49%，是九款里唯一披露预定利率的（1.75%）。<b>适合看重分红、又希望前十来年保留退出余地的客户</b>。</td><td class="n">1.49%</td><td class="n">第 10 年</td></tr>
+<tr><td>大都会<br><span class="src">都会乐享</span></td><td>个险、<b>分红</b>。每年领一整个基本保额、领到 105 岁，但现价第 1 年只有六成、最后归零，没有满期金。保证 1.42%，3 年交可比的八款里最低，交费期拉长损失也最大。<b>只适合确定二十年不动、要「活多久领多久」的客户</b>。</td><td class="n">1.42%</td><td class="n">第 20 年</td></tr>
+<tr><td>平安<br><span class="src">盛世金越至尊版26</span></td><td>个险、<b>分红</b>、九款里唯一的中资产品。和都会乐享同一形态：每年领一整个基本保额，满期只剩一个基本保额；但<b>领取期间（9~29 年或至 105 岁）和起领年龄都能选</b>，前期现价明显更高，第 8 年就能退保打平。领到 105 岁的保证收益 1.47%（趸交），领得越短越低（9 年只有 0.85%）。<b>适合想「从某个年龄起按年领固定若干年」、又希望中途能退得出来的客户</b>。</td><td class="n">1.47%<br><span class="src">趸交</span></td><td class="n">第 8 年<br><span class="src">趸交</span></td></tr>
+</table></div>
+
+<h2>总体规律</h2>
+
+<div class="card"><h2 style="margin:0 0 6px">1. 先问客户一句话：要「稳稳的确定」还是「多一点可能」</h2>
+<p>九款分两类。<b>不分红的</b>（宏瑞年年、乐享丰年心享版）合同写多少就是多少，保证 IRR 分别是 1.80% 和 1.68%。<b>分红的</b>（恒曜、金生荣耀、永裕两款、都会乐享、都会长盈、盛世金越）保证部分只有 1.42%~1.60%，低 0.1~0.4 个百分点，但多了一份红利：友邦四款说明书演示的到期 IRR 在 2.67%~2.76% 之间。</p>
+<p>关键在于：<b>红利不保证</b>，分多少由公司经营结果决定，某些年份可能一分没有，演示数字不是承诺。所以这不是「谁收益高」，而是客户更想要哪一种。这一句讲清楚，比争论小数点后两位有用得多。</p>
+<p class="src">友邦四个分红演示分别来自各自说明书的投保案例，年龄和交费期都不一样，只能看个大概量级，不能直接横比。大都会两款和平安说明书按「累积生息」演示红利且只列出部分年度，本工具已取其「当年度红利」列按直接领取口径建模（未列示年度线性插值），含分红数据可在「产品对比」页查看。</p></div>
+
+<div class="card"><h2 style="margin:0 0 6px">2. 收益率差得很小，回本速度差得很大</h2>
+<p>九款保证 IRR 基本挤在 1.42%~1.80% 这 0.4 个百分点里，可退保回本的年份却从第 5 年到第 23 年，差了四倍多：宏瑞年年 5 年、<b>都会长盈 5 年</b>、乐享丰年 6 年、永裕优享版 6 年、永裕人生 7 年、盛世金越 8 年（趸交）、恒曜 10 年、<b>都会乐享 20 年</b>、金生荣耀 23 年。</p>
+<p>两款要特别留意：<b>金生荣耀</b>的现金价值长期低于已交保费，趸交要 21 年、20 年交要 29 年才回本，第 20 年退保算下来是 −0.40%（20 年交更差，−2.24%），也就是<b>亏本</b>；<b>都会乐享</b>的现金价值第 1 年只有已交保费的 66%，最高也就到 71%（第 4 年），之后一路下滑，靠每年领到的年金才慢慢追平，客户年纪越小、交费期越长回本越晚（0 岁趸交要到第 23 年，20 年交要到第 29 年）。</p>
+<p><b>这是九款之间最实在的差别。</b>客户要是说不准以后会不会动这笔钱，这一条应该比 IRR 先问。</p></div>
+
+<div class="card"><h2 style="margin:0 0 6px">3. 同样是「每年给钱」，来源完全不同</h2>
+<p><b>本金留着的</b>（恒曜、金生荣耀、永裕两款、宏瑞年年、都会长盈）：到期还会再给一笔——前几款按已交保费、永裕两款按基本保额——全程累计领到的钱大约是已交保费的 204%~222%。年金是本金之外多给的。中途现金价值也一直在高位：永裕 104%~106%、宏瑞年年 100%、都会长盈 100%~102%、恒曜 99%~115%。</p>
+<p><b>本金分批还的</b>（乐享丰年心享版、都会乐享、盛世金越）：现金价值最后归零或只剩一个基本保额，身故金也随着已领年金逐年变少。乐享丰年全程累计领取 144%~171%，都会乐享 132%~213%，盛世金越领到 105 岁 128%~211%、领 9 年只有 108%（岁数越小、领的年头越长，这个数越高）。这几款每年给的钱里，很大一块本来就是客户自己的本金。</p>
+<p>所以这几款每年给得最多（乐享丰年例子里首年 8,729 元，是恒曜 3,060 元的 2.9 倍；都会乐享趸交 100 万每年领 26,890 元），但不能简单说「它给得多」。<b>要花掉的钱选它们，要留给下一代的本金别选。</b></p>
+<p><b>金生荣耀是第三种</b>：到期虽然退还已交保费，但中途现金价值长期偏低（第 10 年 66%、第 30 年 87%、第 45 年 93%），要到第 65 年才追平。</p></div>
+
+<div class="card"><h2 style="margin:0 0 6px">4. 钱什么时候到手，各家节奏不一样</h2>
+<ul>
+<li><b>都会乐享</b>：第 5 年起，每年给<b>一整个基本保额</b>（100%），一直给到 105 周岁。也可以改成月领，每月给基本保额的 8.4%，全年合计多 0.8%。</li>
+<li><b>都会长盈</b>：交满后第 5 年（5 年交是第 6 年）先一次性给<b>一个基本保额</b>，此后每年给已交保费的 <b>1.75%</b>，一直给到期满，到期再全额退还已交保费。</li>
+<li><b>乐享丰年</b>：第 5 年起每年给基本保额的 10%，金额固定，一直给到期满。加选祝寿金的话，再叠加每年已交保费的 5%，连给 20 年。</li>
+<li><b>恒曜 / 金生荣耀</b>：第 5 年起给基本保额的 20%，<b>64 周岁后翻倍到 40%</b>。年轻时少、上年纪后多。</li>
+<li><b>宏瑞年年</b>：每年给已交保费的 2%，另外在第 5~18 年（看交费期）连领 2 次特别年金，每次一个基本保额。</li>
+<li><b>永裕两款</b>：每年给已交保费的 1.25%，另外从第 10 年起<b>每满 5 年</b>多给一次，每次是已交保费的 2.6%。</li>
+<li><b>盛世金越</b>：每年给<b>一整个基本保额</b>（年领不超过年交保费×交费年数×20%），趸交最早第 5 年、期交最早第 6 年且交满后开始，最晚 90 周岁，<b>投保时约定起领年龄和领取期间</b>（9/14/19/24/29 年或至 105 周岁），领完再给一个基本保额满期金。可改月领（每月 8.4%）。</li>
+</ul>
+<p>到 70 周岁时一共领到手多少（占已交保费）：乐享丰年 76%、盛世金越 69%（趸交）、都会乐享 65%、宏瑞年年 50%、都会长盈 45%、永裕两款 44%、金生荣耀 34%、恒曜 33%。想「早点见到钱」，顺序很清楚。</p></div>
+
+<div class="card"><h2 style="margin:0 0 6px">5. 客户年纪大，有五款不吃亏</h2>
+<p>投保年龄从 0 岁提到 70 岁，保证 IRR 的降幅：永裕两款 −0.12（1.62%→1.50%）、宏瑞年年 −0.14（1.83%→1.69%）、都会乐享 −0.14（1.57%→1.43%，趸交口径）、盛世金越 −0.26（1.55%→1.29%，趸交至 105 岁）、乐享丰年 −0.73（1.77%→1.04%）；恒曜和金生荣耀的费率表只编到 70 岁，到 60 岁时已分别降到 1.31% 和 1.28%。</p>
+<p>原因在算法：永裕的年金和满期金都按保费的固定比例给，宏瑞年年的年金也按已交保费算，都跟年龄无关；都会乐享则是岁数越大保额越高（同样 100 万趸交，40 岁每年领 26,890 元，60 岁领 34,680 元），刚好抵消了领取年头变短。盛世金越形态相同，但保额随年龄涨得没那么多（40 岁到 70 岁涨 57%，都会乐享涨 58% 且基数更高），高龄投保与都会乐享的差距拉大到 0.14 个百分点。乐享丰年是固定保到 85 或 100 周岁，岁数大了剩下的年头短，最吃亏。</p>
+<p>都会长盈是另一种抗跌：0 岁到 80 岁保证 IRR 只在 1.63%~1.57% 之间，且<b>投保上限 80 周岁，是九款里最高的</b>。</p>
+<p><b>55 岁以上的客户</b>优先看永裕两款、宏瑞年年、都会长盈和都会乐享；<b>给孩子买</b>则乐享丰年（1.77%~1.82%）和宏瑞年年（1.83%）领先——都会乐享给孩子买回本太慢（0 岁趸交要第 23 年）。</p></div>
+
+<div class="card"><h2 style="margin:0 0 6px">6. 想分期慢慢交，有两家不打折</h2>
+<p>从趸交改成最长的交费期，保证 IRR 的变化：永裕两款 0（趸交、3 年、5 年都是 1.59%）、宏瑞年年 −0.04、恒曜 −0.05、乐享丰年 −0.15、金生荣耀 −0.22（1.68%→1.46%）。<b>都会乐享 −0.35</b>（趸交 1.53%→20 年交 1.18%，可测算的八款里最敏感）；都会长盈趸交、3 年交、5 年交几乎持平（1.60% 上下）。平安盛世金越期交现价未公开，无法测算；说明书案例 6 年交、60 岁起领 19 年的保证 IRR 为 1.10%。</p>
+<p>客户想拉长交费期，永裕和宏瑞年年基本不吃亏；金生荣耀选长交费期要特别谨慎，再叠加它本来就慢的回本速度，20 年交要等到第 29 年才回本。</p></div>
+
+<div class="card"><h2 style="margin:0 0 6px">7. 七款男女同价，大都会两款分男女</h2>
+<p>友邦四款、中宏两款和平安盛世金越在相同条件下男女的保证 IRR 完全一样（差异不到 0.01 个百分点）。乐享丰年虽然费率表分男女编，但差别只在祝寿金能从几岁开始领（女 55/60 周岁、男 60/65 周岁）。</p>
+<p><b>大都会两款是例外</b>：同样的保费，女性拿到的基本保额略低（都会乐享 40 周岁趸交 100 万，男 26,890 元、女 26,730 元），保证 IRR 低 0.01~0.03 个百分点。因为女性预期领取的年头更长。给女性客户做方案时记得单独算一遍。</p></div>
+
+<h2>每款产品小结</h2>
+<p class="note">下面每款的数字都基于同一个例子：男 40 周岁、3 年交、每年 10 万元（平安盛世金越为趸交 30 万）。</p>
+
+<div class="card"><h2 style="margin:0 0 4px">中宏宏瑞年年年金保险</h2>
+<p class="src">普通型（不分红）· 个险代理人 · 2026-01-07 上市 · 保到 105 周岁 · 投保上限 75 周岁</p>
+<p><b>怎么给钱：</b>每年给已交保费的 2%（6,000 元），趸交和 3 年交从第 7 个保单周年日开始，交费期越长开始越晚。另外有两次特别生存年金，每次等于一个基本保额。到期退还全部已交保费。</p>
+<p><b>好在哪：</b>九款里保证 IRR 最高（1.80%），回本最快（第 5 年），投保年龄从 0 岁到 70 岁只差 0.14 个百分点。<b>只有它可以减额交清</b>——客户以后交不动保费时，这是唯一的缓冲。年金还能选按月领（全年合计多 2%）。</p>
+<p><b>要提醒：</b>不分红，1.80% 就是上限，没有红利的想象空间。</p>
+<p><b>适合：</b>只认确定数字、可能中途要用钱、或者年纪偏大的客户。</p></div>
+
+<div class="card"><h2 style="margin:0 0 4px">中宏乐享丰年心享版年金保险</h2>
+<p class="src">普通型（不分红）· 个险代理人 · 2025-09-01 上市 · 保到 85 或 100 周岁（投保时选）· 投保上限 75 周岁</p>
+<p><b>怎么给钱：</b>第 5 年起每年给基本保额的 10%，一直到期满。可以加选祝寿金，从女 55/60、男 60/65 周岁起，每年再给已交保费的 5%，连给 20 年。<b>到期没有满期金</b>。</p>
+<p><b>好在哪：</b>现金流最厚，到 70 周岁已经领回已交保费的 76%~91%。保证 IRR 1.60%~1.71%，在分红产品的保证部分之上。六种方案（保险期间 × 祝寿金）可以按客户的领钱节奏挑。前期现价也不低，第 6 年就能回本。</p>
+<p><b>要提醒：</b>现金价值最后归零，身故金也逐年变少——它是把本金分批还给你，不是本金之外多给。客户年纪越大越不划算（70 岁投保只有 1.04%）。</p>
+<p><b>适合：</b>要一笔确定的、能花掉的现金流，且不打算把这笔钱留给下一代的客户。</p></div>
+
+<div class="card"><h2 style="margin:0 0 4px">友邦永裕人生优享版年金保险（分红型）</h2>
+<p class="src">分红型 · 银保 · 2026-08-12 上市 · 保到 105 周岁 · 投保上限 70 周岁</p>
+<p><b>怎么给钱：</b>每年给已交保费的 1.25%（3,750 元），趸交第 5 年、3 年交第 6 年、5 年交第 7 年开始。第 10 年起每满 5 年多给一次，每次是已交保费的 2.6%（13,000 元）。到期给一个基本保额（例子里 309,300 元）。</p>
+<p><b>好在哪：</b>分红六款里保证部分最高（1.59%）、回本最快（第 6 年），而且从 0 岁到 70 岁只降 0.12 个百分点，交费期拉长也完全不减收益。说明书演示的含红利 IRR 是 2.76%，友邦四款里最高。</p>
+<p><b>要提醒：</b>只能年交，没有半年、季、月交；不可减额交清。红利不保证。</p>
+<p><b>适合：</b>想要红利空间、又不愿意在保证部分让步太多的客户；银行渠道客户。</p></div>
+
+<div class="card"><h2 style="margin:0 0 4px">友邦永裕人生年金保险（分红型）</h2>
+<p class="src">分红型 · 银保 · 2026-06-01 上市 · 保到 105 周岁 · 投保上限 70 周岁</p>
+<p><b>怎么给钱：</b>和优享版<b>完全相同</b>——1.25% 的年金、每 5 年一次 2.6% 的特别年金、到期给一个基本保额、保到 105 周岁、身故金取现价与已交保费的较大者。</p>
+<p><b>和优享版差在哪：</b>两点，都很小。一是费率微调，同样交 10 万，有的年龄新版保额略高、有的略低，平均相差不到 0.05%；二是前期现金价值，例子里第 7 年优享版已到 510,500 元（超过已交保费），这款是 409,300 元，要到第 8 年才超过，<b>回本晚一年</b>。</p>
+<p><b>结论：</b>条件相同时优享版略占优。这一款比优享版早两个多月上市，同为银保渠道，利益上几乎没有损失。</p></div>
+
+<div class="card"><h2 style="margin:0 0 4px">友邦传世金生2026荣耀版年金保险（分红型）</h2>
+<p class="src">分红型 · 个险代理人 · 2026-07-01 上市 · 保到 105 周岁 · 投保上限 70 周岁</p>
+<p><b>怎么给钱：</b>第 5 年起每年给基本保额的 20%（3,190 元），<b>64 周岁后翻倍到 40%</b>。到期退还全部已交保费。</p>
+<p><b>好在哪：</b>交费期档位最全（趸交到 20 年交共 6 档）。长期持有到期，保证 IRR 1.54%，略高于恒曜；说明书演示含红利 2.70%。</p>
+<p><b>要提醒：</b><b>这是九款里中途退保最吃亏的一款。</b>现金价值长期低于已交保费，第 20 年退保是 −0.40%，20 年交更是 −2.24%，要到第 23 年（趸交 21 年、20 年交 29 年）才回本。只适合确定几十年不动的钱。条款里写明红利来源仅为利差。</p>
+<p><b>适合：</b>确定长期不动用、且认可红利逻辑的客户。凡是有中途退保可能的，换恒曜。</p></div>
+
+<div class="card"><h2 style="margin:0 0 4px">友邦传世恒曜年金保险（分红型）</h2>
+<p class="src">分红型 · 个险代理人 · 2026-08-26 上市 · 保到 105 周岁 · 投保上限 70 周岁 · <b>预定利率 1.75%</b>（九款里唯一披露的）</p>
+<p><b>怎么给钱：</b>规则和金生荣耀一模一样——第 5 年起给基本保额的 20%（3,060 元），64 周岁后翻倍到 40%（6,120 元），到期退还已交保费。</p>
+<p><b>和金生荣耀差在哪：</b>保证 IRR 略低（1.49% 对 1.54%），交费期档位少（4 档对 6 档），但<b>前期现金价值高得多</b>：第 10 年就能回本，第 25 年现价达到已交保费的 110%，而金生荣耀要等到第 23 年才回本。说明书演示含红利 2.67%。</p>
+<p><b>适合：</b>看重分红产品、但希望前十来年保留退出余地的客户。</p></div>
+
+<div class="card"><h2 style="margin:0 0 4px">都会乐享年金保险（分红型）</h2>
+<p class="src">分红型 · 个险代理人 · 2026-02-14 上市 · 保到 105 周岁后的首个保单周年日 · 投保上限 70 周岁 · 趸交至 20 年交共 6 档 · 中美联泰大都会人寿</p>
+<p><b>怎么给钱：</b>第 5 个保单周年日起，每年给<b>一整个基本保额</b>，一路给到 105 周岁，中间不加码也不减少。也可以改月领，每月 8.4%，全年合计多 0.8%。<b>到期没有满期金</b>，现价归零。身故金是「已交保费减去已经产生的年金」和现价里的大数。</p>
+<p><b>好在哪：</b>领得久是它最大的特点——保到 105 周岁，40 岁趸交能连领 61 年。岁数大的客户不吃亏：同样 100 万趸交，40 岁每年领 26,890 元，60 岁领 34,680 元，0 岁到 70 岁保证 IRR 只差 0.14 个百分点。责任免除只有 3 条，和都会长盈并列九款里最宽松。红利可选现金领取或累积生息。</p>
+<p><b>要提醒：</b><b>前期现金价值是九款里最低的一档</b>——第 1 年只有已交保费的 66%，最高到 71%（第 4 年），之后一路下滑，要靠领到的年金才能追平，40 岁趸交要到第 17 年、3 年交要到第 20 年、20 年交要到第 29 年，0 岁投保更晚。这笔钱一旦交进去，前二十年不能动。另外它和都会长盈一样男女不同价。</p>
+
+<p><b>适合：</b>一笔确定几十年不动的钱，客户要的是「活多久领多久」的长期现金流，尤其是岁数偏大的客户。</p></div>
+
+<div class="card"><h2 style="margin:0 0 4px">都会长盈（2026）年金保险（分红型）</h2>
+<p class="src">分红型 · 银保 · 2026-06-22 上市 · 保到 105 周岁后的首个保单周年日 · <b>投保上限 80 周岁</b>（九款里最高）· 趸交 / 3 年交 / 5 年交 · 中美联泰大都会人寿</p>
+<p><b>怎么给钱：</b>交满后第 5 年（5 年交是第 6 年）先<b>一次性给一个基本保额</b>（例子里 2,419 元），此后每年给<b>已交保费的 1.75%</b>（5,250 元），一直给到期满；<b>到期全额退还已交保费</b>。身故金取已交保费与现价的较大者。</p>
+<p><b>好在哪：</b>结构最好懂——本金到期原样还你，中间每年 1.75% 是净给的。<b>回本最快的一档</b>：交费期满那年特别生存金一到账就打平（趸交、3 年交第 5 年，5 年交第 6 年），此后现价一直稳在已交保费的 100%~102%，中途退保不亏。投保上限 80 周岁，0 岁到 80 岁保证 IRR 只在 1.63%~1.57% 之间，年龄几乎不影响。交费期拉长也不掉收益。责任免除只有 3 条。</p>
+<p><b>要提醒：</b>年金给得薄（每年只有已交保费的 1.75%），要「现金流厚」的客户不合适；红利不保证；男女不同价，给女性做方案要单独算。</p>
+<p><b>适合：</b>想要「本金安全、中间有点零花、到期原样拿回」的客户，尤其是岁数大、其他产品投不进去的（70~80 周岁）。</p></div>
+
+<div class="card"><h2 style="margin:0 0 4px">平安盛世金越（至尊版26）年金保险（分红型）</h2>
+<p class="src">分红型 · 个险代理人 · 2026-03-07 上市 · 保到领取期间届满后的下一个保单周年日 · 投保上限 70 周岁 · 趸交至 20 年交共 6 档 · 中国平安人寿（九款里唯一的中资）</p>
+<p><b>怎么给钱：</b>每年给<b>一整个基本保额</b>（例子里趸交 30 万每年 7,920 元），趸交最早第 5 年、期交最早第 6 年且交满后开始，最晚 90 周岁；领取期间 9/14/19/24/29 年或至 105 周岁，投保时定。领完再给一个基本保额作满期金。可改月领，每月 8.4%。身故金是「已交保费减去已产生的生存金」和现价里的大数。</p>
+<p><b>好在哪：</b>九款里<b>领法最灵活</b>——可以做成「60 岁起领 19 年」这样的养老补充金，也可以最早第 5 年起一直领到 105 岁。前期现价在同形态里明显更高：第 8 年达峰（约为保费的 95%），<b>第 8 年退保就能打平</b>，都会乐享要第 17 年。男女同费率。</p>
+<p><b>要提醒：</b>保证收益不高：领到 105 岁 1.47%，领得越短越低（29 年 1.29%、9 年 0.85%）；岁数越大下降越快（70 岁投保 1.29%）。说明书演示的含红利 IRR 约 2.2%，红利不保证。平安官网<b>只公开了趸交现价</b>，期交方案只能看说明书案例（6 年交、60 岁起领 19 年：保证 IRR 1.10%，累计领取 134%）。责任免除 7 条。</p>
+<p><b>适合：</b>想「从某个年龄起按年领固定若干年」、中途也可能要用钱、看重平安品牌的客户。只看每年到手金额和长期收益的，都会乐享更好。</p></div>
+
+<h2>按客户需求选型</h2>
+<div class="scroll lock"><table>
+<tr class="hd"><th>客户最在意什么</th><th>推荐</th><th>为什么</th></tr>
+<tr><td>只要确定，不想听「演示」</td><td>宏瑞年年</td><td>保证 IRR 最高 1.80%，年龄不敏感，还能减额交清</td></tr>
+<tr><td>要每年拿到手的钱最多</td><td>乐享丰年（至 100 周岁 + 祝寿金）</td><td>70 周岁已领回 84%，远超其他；代价是没有满期金、现价最后归零</td></tr>
+<tr><td>要「活多久领多久」的长期现金流</td><td>都会乐享</td><td>每年一整个基本保额，领到 105 周岁，比同形态的平安每年多领约 2%；但前十几年不能退保</td></tr>
+<tr><td>从某个年龄起领固定若干年（养老补充、子女教育）</td><td>平安盛世金越</td><td>领取期间 9~29 年可选、起领年龄可约定到 90 岁，九款里唯一；代价是保证收益偏低</td></tr>
+<tr><td>要「每年领一个保额」、又怕前期被套住</td><td>平安盛世金越</td><td>第 8 年退保打平，同形态的都会乐享要第 17 年</td></tr>
+<tr><td>可能中途要用钱</td><td>宏瑞年年 / 乐享丰年 / 永裕优享版</td><td>5~6 年回本；<b>避开金生荣耀和都会乐享</b></td></tr>
+<tr><td>想要红利的上行空间</td><td>永裕优享版</td><td>分红几款里保证部分最高、回本最快，演示 IRR 也最高</td></tr>
+<tr><td>要分红、又怕前期被套住</td><td>恒曜</td><td>第 10 年回本，比金生荣耀早 13 年</td></tr>
+<tr><td>55 岁以上高龄投保</td><td>永裕两款 / 宏瑞年年 / 都会乐享</td><td>收益几乎不随年龄下降</td></tr>
+<tr><td>给 0~10 岁孩子买</td><td>宏瑞年年 / 乐享丰年</td><td>保证 IRR 1.83% / 1.77%~1.82%；都会乐享给孩子买回本太慢</td></tr>
+<tr><td>想拉长交费期</td><td>永裕两款 / 宏瑞年年</td><td>交费期拉长几乎不损失收益</td></tr>
+<tr><td>本金一分不能少，中途还可能要用</td><td>都会长盈</td><td>到期全额退还已交保费，交费期满即回本，之后现价一直在 100% 以上</td></tr>
+<tr><td>70~80 岁的客户</td><td>都会长盈</td><td>九款里唯一能投到 80 周岁的</td></tr>
+<tr><td>以后可能交不动保费</td><td>宏瑞年年</td><td>九款里唯一可以减额交清的</td></tr>
+</table></div>
+
+<div class="card"><h2 style="margin:0 0 6px">口径与风险提示</h2>
+<ul>
+<li>本页所有 IRR 和回本年份都是<b>保证利益</b>，不含红利。红利不保证，某些年度可能为零。</li>
+<li>计算假设年金<b>一领到手就拿走、不再生息</b>。乐享丰年的年金可以选择买成交清增额保险、都会乐享的红利可以选择累积生息，选了之后利益结构会变，本工具没有算这些情形。</li>
+<li>「保证退保打平」假设客户在那一年年末退保拿走现价，实际退保还要扣掉欠交保费、保单贷款等未还款项。</li>
+<li>各款保险期间不一样：乐享丰年保到 85 或 100 周岁，盛世金越随领取期间而定，其余保到 105 周岁。比 IRR 时留意表里最后一列「保障到几岁」。</li>
+<li><b>数据完整度：</b>友邦、中宏、大都会八款的费率表与现金价值表均已全量入库，并逐行核对官方说明书的投保示例。平安盛世金越官网只公开了趸交现价，本工具入库趸交全部 852 个组合（最早起领），期交只有说明书案例一组（未列示年度线性插值），其他期交组合无法试算；起领年龄推迟的方案未建模。其中大都会两款的现价表 PDF 存在字符纵坐标重合、行首年龄与首列数字粘连的问题，已用两种互相独立的方法还原并交叉验证，全表自查无异常。</li>
+<li>预定利率只有恒曜披露为 1.75%，其余均为「未采集」，官方公开资料没有写。上市日期、渠道与在售状态取自各公司在售产品清单（2026-09），尚未逐项在中国保险行业协会人身保险产品信息库复核。</li>
+<li>以上只基于已入库的这 9 款，不代表整个市场，中资公司目前只有平安一款样本。佣金、起售门槛、核保政策这些销售端因素都没有纳入。</li>
+</ul></div>`;
+
+/* 上半部分是可调基准的横向指标表(现算)，下半部分是结构性结论(定稿文字，均标注所依据的基准案例)。
+   保费固定 10 万：这几款费率都与保费成正比，比率与 IRR 不随保费变化，固定下来可少一个干扰项。 */
+const SUMBASE={g:'男',t:5,a:40,prem:100000};
+const sumCum=()=>SUMBASE.t===0?SUMBASE.prem:SUMBASE.t*SUMBASE.prem;
+function sumRows(F){
+ const out=[],na=[];
+ F.forEach(p=>{
+  const pid=p.product_id, vs=variantsOf(pid,SUMBASE.g), codes=vs?vs.map(x=>x.code):[undefined];
+  let any=false;
+  codes.forEach(v=>{
+   const pj=project(pid,SUMBASE.g,SUMBASE.t,SUMBASE.a,SUMBASE.prem||0,null,v);
+   if(!pj)return; any=true;
+   const FR=pj.rows[pj.last-1], a1=pj.rows.find(r=>r.ann>0);
+   const n70=70-SUMBASE.a, r70=(n70>=1&&n70<=pj.last)?pj.rows[n70-1]:null;
+   /* 峰值用纯现金价值(不含当日年金)：这一列回答的是「中途退保能拿回多少」 */
+   let peak=0,peakN=0; pj.rows.forEach(r=>{if(r.cv/r.cum>peak){peak=r.cv/r.cum;peakN=r.n;}});
+   const term=byId[pid]?.policy_terms||'';
+   const ty=(term.match(/(\d+)\s*周岁/)||[])[1];
+   out.push({p,v,pj,term:(v&&varLabel(pid,v).split('·')[0].trim())||(ty?'至'+ty+'周岁':''),
+     SA:pj.SA,annN:a1?a1.n:null,ann1:a1?a1.ann:0,mat:FR.mat,
+     peak,peakN,be:breakeven(pj,false),got70:r70?(r70.cumA+(r70.n===pj.last?r70.mat:0))/r70.cum:null,
+     irr:irr(pj,pj.last,false),endAge:SUMBASE.a+pj.last});
+  });
+  if(!any)na.push(p.short_name||p.product_name);
+ });
+ out.sort((x,y)=>(y.irr==null?-9:y.irr)-(x.irr==null?-9:x.irr));
+ return {out,na};
+}
+function sumTable(F){
+ const {out,na}=sumRows(F);
+ /* 总保费放在表格最上方：先知道一共要交多少，再看每年能领多少 */
+ const head=`<div class="card" style="background:var(--steelw);border-color:#C5D8E6;padding:calc(var(--pad) - 1px) var(--pad);margin-bottom:8px">
+  <div style="font-size:var(--fsS);color:var(--ink2)">这套条件下一共要交的保费</div>
+  <div style="font-size:calc(var(--fs) + 7px);font-weight:600;font-variant-numeric:tabular-nums;line-height:1.25">${fmt(sumCum())} 元</div>
+  <div class="src">${SUMBASE.g} ${SUMBASE.a} 周岁 · ${SUMBASE.t?`每年 ${fmt(SUMBASE.prem)} 元 × ${SUMBASE.t} 年`:`趸交 ${fmt(SUMBASE.prem)} 元`}　下表的年金与满期金都按这个保费算；比率和 IRR 不随保费变化</div></div>`;
+ if(!out.length)return head+`<div class="card">这套条件下，筛选出的产品都不可售。换一个投保年龄或交费期间再看。</div>`;
+ const pctS=x=>x==null?'—':(x*100).toFixed(0)+'%';
+ return head+`<div class="scroll lock"><table>
+  <tr class="hd"><th>产品</th><th class="n">保证IRR<br>至期满</th><th class="n">保证<br>退保打平</th><th class="n">首年年金</th><th class="n">满期金</th><th class="n">现价峰值<br>占累计保费</th><th class="n">70周岁<br>累计已领</th><th class="n">保障<br>到几岁</th></tr>
+  ${out.map(r=>`<tr class="${isOwn(r.p)?'own-row':''}"><td>${ownTag(r.p)}${esc(coName(r.p))}${esc(r.p.short_name||r.p.product_name)}<br><span class="src">${esc(r.term)}${r.v&&varLabel(r.p.product_id,r.v).includes('祝寿金')?' · '+esc(varLabel(r.p.product_id,r.v).split('·')[1].trim()):''} · 年金第 ${r.annN} 年起</span></td>
+   <td class="n"><b>${irrTxt(r.irr)}</b></td>
+   <td class="n">${r.be?'第 '+r.be+' 年':'不回本'}</td>
+   <td class="n">${fmt(r.ann1)}</td>
+   <td class="n">${r.mat?fmt(r.mat):'<b>无</b>'}</td>
+   <td class="n">${pctS(r.peak)}<br><span class="src">第 ${r.peakN} 年</span></td>
+   <td class="n">${pctS(r.got70)}</td>
+   <td class="n">${r.endAge}</td></tr>`).join('')}
+  </table></div>
+  ${na.length?`<p class="src">${esc(na.join('、'))}：这套条件下不可售，或该交费期间的官方现价表尚未入库，未列入（见「产品对比」页各产品的可售组合）。</p>`:''}
+  <p class="src">“保证退保打平”＝<b>只算保证利益</b>时，退保拿到的现价加上此前已领年金，首次追平累计已交保费的年度（分红产品若把红利算进来会更早，见「说明书演示」页）；“现价峰值”是纯现金价值的最高点，不含当日年金；“70周岁累计已领”只算已到手的年金，不含要退保才能拿到的现价。
+   分红型产品这里只算<b>保证利益</b>，不含红利演示，所以与说明书演示的数字不同（见下文第 1 条）。</p>`;
+}
+function renderSum(F){
+ const el=document.getElementById('v-sum');
+ if(!F.length){el.innerHTML='<h2>市场洞察</h2><div class="card">没有符合筛选条件的产品。</div>';return;}
+ el.innerHTML=MARKET+OWNPOS+SUMTEXT;
+}
+/* 旧版：结论页自带一套条件控件与指标表；现已整体挪到「利益试算」页，复用那一页的条件 */
+function renderSumOld(F){
+ const el=document.getElementById('v-sum');
+ el.innerHTML=`<h2>横向指标表</h2>
+  <p class="note">同一套投保条件下把各款拉平比较，数值现算自官方费率表与现价表，<b>均为保证利益，不含红利</b>。改下面四个条件，表会跟着变。</p>
+  <div class="card"><div class="grid">
+   <div><label for="s-g">性别</label><select id="s-g"><option${SUMBASE.g==='男'?' selected':''}>男</option><option${SUMBASE.g==='女'?' selected':''}>女</option></select></div>
+   <div><label for="s-t">交费期间</label><select id="s-t">${allTerms().map(t=>`<option value="${t}"${t===SUMBASE.t?' selected':''}>${t?t+'年交':'趸交'}</option>`).join('')}</select></div>
+   <div><label for="s-a">投保年龄</label><select id="s-a">${Array.from({length:maxAge()+1},(_,i)=>`<option value="${i}"${i===SUMBASE.a?' selected':''}>${i}周岁</option>`).join('')}</select></div>
+   <div><label for="s-m">${SUMBASE.t?'年交保费（元）':'趸交保费（元）'}</label><input id="s-m" type="number" value="${SUMBASE.prem}" min="1000" step="10000"></div>
+  </div></div>
+  <div id="s-tbl">${sumTable(F)}</div>
+  ${SUMTEXT}`;
+ const upd=()=>{SUMBASE.g=document.getElementById('s-g').value;SUMBASE.t=+document.getElementById('s-t').value;
+  SUMBASE.a=+document.getElementById('s-a').value;SUMBASE.prem=+document.getElementById('s-m').value||0;
+  document.getElementById('s-tbl').innerHTML=sumTable(F);
+  const lb=document.querySelector('label[for="s-m"]');if(lb)lb.textContent=SUMBASE.t?'年交保费（元）':'趸交保费（元）';};
+ ['s-g','s-t','s-a'].forEach(i=>document.getElementById(i).onchange=upd);
+ document.getElementById('s-m').oninput=upd;
+}
+/* ============ 利益试算 ============ */
+let SEL=[];
+function allTerms(){const s=new Set();for(const p in D.rate)for(const g in D.rate[p])
+ Object.keys(D.rate[p][g]).forEach(k=>s.add(+k.split('|')[0]));return [...s].sort((a,b)=>a-b);}
+function maxAge(){let m=0;for(const p in D.rate)for(const g in D.rate[p])
+ Object.keys(D.rate[p][g]).forEach(k=>m=Math.max(m,+k.split('|')[1]));return m;}
+/* 不能试算的原因：有该交费期间的可售组合、却几乎没有现价数据＝官方未公开该交费期间现价表（如平安只公开趸交） */
+function naWhy(pid,g,t,a){
+ const has=D.options.some(o=>o.product_id===pid&&+o.payment_term_years===t&&a<=+o.entry_age_max_years);
+ const n=Object.keys(D.cv[pid]?.[g]||{}).filter(k=>+k.split('|')[0]===t).length;
+ return has&&n<=1?'现价表未公开':'不可售';}
+let F_ALL=[];
+/* 案例条件：筛选变化时保留用户已改的条件，不再每次重置 */
+const CASE={g:'男',t:5,a:40,prem:100000};
+function calcUI(F){ F_ALL=F;
+ const el=document.getElementById('l-calc');
+ if(!el)return;
+ if(!F.length){el.innerHTML='';return;}
+ SEL=F.map(p=>p.product_id);
+ el.innerHTML=`<h2>案例摘要</h2>
+  <p class="note">所选产品按同一套条件横向比较。数值由官方费率表与现价表逐年还原，<b>均为保证利益，不含红利</b>。各公司现价表口径不同（是否含当年年金），计算时已统一。改条件时，下方对比总表与各产品明细里的逐年利益也会跟着变。</p>
+  <div class="card"><div class="grid">
+   <div><label for="c-g">性别</label><select id="c-g"><option>男</option><option>女</option></select></div>
+   <div><label for="c-t">交费期间</label><select id="c-t">${allTerms().map(t=>`<option value="${t}">${t?t+'年交':'趸交'}</option>`).join('')}</select></div>
+   <div><label for="c-a">投保年龄</label><select id="c-a">${Array.from({length:maxAge()+1},(_,i)=>`<option value="${i}">${i}周岁</option>`).join('')}</select></div>
+   <div><label for="c-m" id="c-ml">年交保费（元）</label><input id="c-m" type="number" value="100000" min="1000" step="10000"></div>
+  </div></div><div id="c-var"></div>`;
+ ['c-g','c-t','c-a'].forEach(i=>document.getElementById(i).onchange=runCalc);
+ document.getElementById('c-m').oninput=runCalc;
+ document.getElementById('c-g').value=CASE.g;document.getElementById('c-t').value=CASE.t;
+ document.getElementById('c-a').value=CASE.a;document.getElementById('c-m').value=CASE.prem;
+ runCalc();
+}
+function renderVar(g){const el=document.getElementById('c-var');if(!el)return;
+ const ps=SEL.filter(id=>variantsOf(id,g));
+ if(!ps.length){el.innerHTML='';return;}
+ el.innerHTML=`<div class="card"><div class="grid">${ps.map(id=>{const cur=varOf(id,g);
+   return `<div><label for="cv-${id}">${esc(byId[id].short_name||byId[id].product_name)} · 方案</label>
+    <select id="cv-${id}" data-id="${id}">${variantsOf(id,g).map(x=>
+     `<option value="${x.code}"${x.code===cur?' selected':''}>${esc(x.label)}</option>`).join('')}</select></div>`;}).join('')}</div>
+   ${ps.map(id=>byId[id].variant_note?`<p class="src" style="margin:6px 0 0">${esc(cleanText(byId[id].variant_note))}</p>`:'').join('')}</div>`;
+ el.querySelectorAll('select').forEach(s=>s.onchange=()=>{VAR[s.dataset.id]=s.value;runCalc();});}
+function runCalc(){
+ const g=document.getElementById('c-g').value,t=+document.getElementById('c-t').value,
+       a=+document.getElementById('c-a').value,prem=+document.getElementById('c-m').value;
+ renderVar(g);
+ SUMBASE.g=g; SUMBASE.t=t; SUMBASE.a=a; SUMBASE.prem=prem;
+ CASE.g=g; CASE.t=t; CASE.a=a; CASE.prem=prem;
+ const ml=document.getElementById('c-ml'); if(ml)ml.textContent=t?'年交保费（元）':'趸交保费（元）';
+ const F=F_ALL.length?F_ALL:P;
+ const items=SEL.map(id=>{
+   const v=varOf(id,g);
+   const dm=demoList(id).find(d=>d.gender===g&&d.age===a&&d.term===t&&d.premium===prem&&(!d.variant||d.variant===v));
+   const isDemo=!!dm&&Array.isArray(dm.div);
+   return {id,p:byId[id],v,pj:project(id,g,t,a,prem,isDemo?dm.div:null,v),isDemo};
+ });
+ const ok=items.filter(x=>x.pj);
+ const to70=x=>{const n=70-a;return (n>=1&&n<=x.pj.last)?n:null;};
+ const R=(label,fn,cls='')=>`<tr class="${cls}"><th>${label}</th>${items.map(x=>
+   `<td class="n">${x.pj?fn(x):`<span class="na">${naWhy(x.id,g,t,a)}</span>`}</td>`).join('')}</tr>`;
+ const anyDemo=items.some(x=>x.isDemo);
+ const beT=b=>b?'第 '+b+' 年':'期末未打平';
+ /* 第一段：产品形态要素（DIFFONLY 时只留取值有差异的行，差异行底色标出） */
+ const useF=FIELDS.filter(([k])=>{
+   if(!DIFFONLY||F.length<2)return true;
+   return new Set(F.map(p=>val(p,k))).size>1;});
+ const shapeRows=useF.map(([k,l])=>{
+   const vs=F.map(p=>val(p,k)), diff=F.length>1&&new Set(vs).size>1;
+   return `<tr class="${diff?'diff':''}"><th>${l}</th>${vs.map(v=>`<td>${v}</td>`).join('')}</tr>`;}).join('');
+ /* 第三段：说明书演示——各产品用各自官方固定案例；当前试算条件恰好命中某案例时优先用之 */
+ const demos=items.map(x=>{
+   const ds=demoList(x.id);
+   if(!ds.length)return null;
+   const dm=ds.find(d=>d.gender===g&&d.age===a&&d.term===t&&d.premium===prem&&(!d.variant||d.variant===x.v))||ds[0];
+   const hasDiv=Array.isArray(dm.div)&&dm.div.length;
+   const pj=project(x.id,dm.gender,dm.term,dm.age,dm.premium,hasDiv?dm.div:null,dm.variant);
+   return {dm,pj,hasDiv};
+ });
+ const anyDivD=demos.some(x=>x&&x.hasDiv);
+ const noDiv=i=>items[i].p.dividend_method==='不分红'?'不分红':'<span class="na">无红利演示</span>';
+ const RD=(label,fn,cls='')=>`<tr class="${cls}"><th>${label}</th>${demos.map((x,i)=>
+   `<td class="n">${x&&x.pj?fn(x,i):'<span class="na">无官方演示</span>'}</td>`).join('')}</tr>`;
+ document.getElementById('l-cmp').innerHTML=`
+  ${ok.length?'':`<div class="warn">所选产品都不支持「${g} ${a}周岁 ${t?t+'年交':'趸交'}」这个组合，「利益试算」段无法计算。换个交费期间或投保年龄。</div>`}
+  <div class="scroll lock"><table class="sum${items.length>2?' wide':''}" style="${items.length>2?`min-width:${100+items.length*130}px`:''}">
+   <tr class="hd"><th>产品</th>
+     ${items.map((x,i)=>`<th style="color:${CLR[i]};background:#F1F4F7">${ownTag(x.p)}${esc(x.p.product_name)}${x.v?`<span class="src" style="font-weight:400">${esc(varLabel(x.id,x.v))}</span>`:''}</th>`).join('')}</tr>
+   <tr class="hd"><th colspan="${items.length+1}"><span class="stk">产品形态</span></th></tr>
+   ${shapeRows}
+   <tr class="hd"><th colspan="${items.length+1}"><span class="stk">利益试算 · 同一套条件（上方「案例摘要」所选）· 保证利益</span></th></tr>
+   ${R('基本保额',x=>fmt(x.pj.SA))}
+   ${R('年金起领保单年度',x=>annStartTxt(x.id,t,x.pj))}
+   ${R('年金（保证，首年起领金额）',x=>annFirstTxt(x.id,t,x.pj))}
+   ${R('满期金',x=>fmt(x.pj.rows[x.pj.last-1].mat))}
+   ${R('现价峰值占累计保费',x=>{let peak=0,pn=0;x.pj.rows.forEach(r=>{if(r.cv/r.cum>peak){peak=r.cv/r.cum;pn=r.n;}});
+     return Math.round(peak*100)+'%<br><span class="src">第 '+pn+' 年</span>';})}
+   <tr class="hd"><th colspan="${items.length+1}"><span class="stk">打平年度 · 退保口径</span></th></tr>
+   ${R('保证',x=>beT(breakeven(x.pj,false)),'diff')}
+   ${anyDemo?R('含分红演示',x=>{if(!x.isDemo)return '<span class="na">无官方演示</span>';
+     return beT(breakeven(x.pj,true));},'diff'):''}
+   <tr class="hd"><th colspan="${items.length+1}"><span class="stk">打平年度 · 持有到期口径</span></th></tr>
+   ${R('保证',x=>beT(beHold(x.pj,false)))}
+   ${anyDemo?R('含分红演示',x=>{if(!x.isDemo)return '<span class="na">无官方演示</span>';
+     return beT(beHold(x.pj,true));}):''}
+   <tr class="hd"><th colspan="${items.length+1}"><span class="stk">内部收益率（IRR）</span></th></tr>
+   ${R('至70周岁 · 保证',x=>{const n=to70(x);return n?irrTxt(irr(x.pj,n,false)):'<span class="na">超出保险期间</span>';})}
+   ${anyDemo?R('至70周岁 · 含分红',x=>{if(!x.isDemo)return '<span class="na">无官方演示</span>';
+     const n=to70(x);return n?irrTxt(irr(x.pj,n,true)):'—';}):''}
+   ${R('至期满 · 保证',x=>irrTxt(irr(x.pj,x.pj.last,false)))}
+   ${anyDemo?R('至期满 · 含分红',x=>x.isDemo?irrTxt(irr(x.pj,x.pj.last,true)):'<span class="na">无官方演示</span>'):''}
+   <tr class="hd"><th colspan="${items.length+1}"><span class="stk">说明书演示 · 官方固定案例（各列条件以「案例」一行为准，可能互不相同；红利基于公司精算假设，分配不保证）</span></th></tr>
+   <tr><th>案例（官方给定条件）</th>${demos.map(x=>x?`<td>${x.dm.gender} ${x.dm.age} 周岁 · ${x.dm.term?x.dm.term+' 年交':'趸交'} · ${x.dm.term?'年交 ':''}${fmt(x.dm.premium)} 元</td>`:'<td><span class="na">无官方演示</span></td>').join('')}</tr>
+   ${RD('方案',(x,i)=>x.dm.variant?esc(varLabel(items[i].id,x.dm.variant)):'—')}
+   <tr><th>红利口径</th>${demos.map((x,i)=>`<td>${x?divBasis(items[i].p):'<span class="na">无官方演示</span>'}</td>`).join('')}</tr>
+   ${RD('基本保额',x=>fmt(x.pj.SA)+(x.dm.sa&&Math.round(x.pj.SA)!==x.dm.sa?'<br><span class="src">说明书 '+fmt(x.dm.sa)+'</span>':''))}
+   ${RD('年金起领保单年度',(x,i)=>annStartTxt(items[i].id,x.dm.term,x.pj))}
+   ${RD('年金（首年起领金额）',(x,i)=>annFirstTxt(items[i].id,x.dm.term,x.pj))}
+   ${RD('满期金',x=>x.pj.rows[x.pj.last-1].mat?fmt(x.pj.rows[x.pj.last-1].mat):'<b>无</b>')}
+   <tr class="hd"><th colspan="${items.length+1}"><span class="stk">打平年度 · 退保口径（官方案例）</span></th></tr>
+   ${RD('保证',x=>beT(breakeven(x.pj,false)),'diff')}
+   ${anyDivD?RD('含分红演示',(x,i)=>x.hasDiv?beT(breakeven(x.pj,true)):noDiv(i),'diff'):''}
+   <tr class="hd"><th colspan="${items.length+1}"><span class="stk">打平年度 · 持有到期口径（官方案例）</span></th></tr>
+   ${RD('保证',x=>beT(beHold(x.pj,false)))}
+   ${anyDivD?RD('含分红演示',(x,i)=>x.hasDiv?beT(beHold(x.pj,true)):noDiv(i)):''}
+   <tr class="hd"><th colspan="${items.length+1}"><span class="stk">内部收益率（IRR）（官方案例）</span></th></tr>
+   ${RD('至70周岁 · 保证',x=>{const n=70-x.dm.age;return (n>=1&&n<=x.pj.last)?irrTxt(irr(x.pj,n,false)):'<span class="na">超出保险期间</span>';})}
+   ${anyDivD?RD('至70周岁 · 含分红',(x,i)=>{if(!x.hasDiv)return noDiv(i);
+     const n=70-x.dm.age;return (n>=1&&n<=x.pj.last)?irrTxt(irr(x.pj,n,true)):'—';}):''}
+   ${RD('至期满 · 保证',x=>irrTxt(irr(x.pj,x.pj.last,false)))}
+   ${anyDivD?RD('至期满 · 含分红',(x,i)=>x.hasDiv?irrTxt(irr(x.pj,x.pj.last,true)):noDiv(i)):''}
+  </table></div>
+  <details class="spec"><summary>计算口径</summary><div>
+   <b>年金/特别年金/满期金的起领年度、计价基础(基本保额或累计已交保费)、比例，均按各产品「责任规则表」逐条读取计算，不同产品公式不同</b>——如恒曜/金生按基本保额的20%/40%(64周岁分档)从第5年起领；永裕人生优享版按累计已交保费的1.25%起领(起领年度随交费期间而变)，另加每5年一次、按累计已交保费2.6%的特别年金(保险期间届满日不给付，但常规年金届满日仍给付)；中宏宏瑞年年先领两次特别生存年金(各=基本保额)，再按累计已交保费的2%年年领取至期满，两者起领年度都随交费期间而变。
+   中宏乐享丰年心享版自第5个保单周年日起按基本保额的10%年年领生存年金至期满日(含)，<b>无满期金</b>；可选祝寿金按累计已交保费的5%领20年(女55/60、男60/65周岁起)；身故金为现价与「累计已交保费−已领生存年金与祝寿金」的较大者；其费率与现价随保险期间(至85/至100周岁)和祝寿金选择而不同，在上方「方案」中切换。
+   宏瑞年年按年领口径计算；月领(每月为年领额×8.5%，全年合计多2%，且逐月到账)未建模。<br>
+   <b>现价峰值占累计保费</b> = 纯现金价值(不含当日年金)的最高点与对应的保单年度，回答的是「中途退保最多能拿回多少」。<br>
+   <b>打平年度 · 退保口径</b> = 第一个满足「当年现价 + 起领年度至<u>上一</u>年度已领年金（+ 累计至当年的现金红利）≥ 累计已交保费」的保单年度。
+   友邦现价表列示值已含当年度年金/特别年金与末年满期金，故已领部分只累加至上一年度，避免重复计入；中宏现价表列示值不含当日给付，本工具先把当日年金(末年加满期金)补进"当年现价"再套同一公式，两种口径结果可直接比较；现金红利不在保证利益现价内，累计至当年。<br>
+   <b>打平年度 · 持有到期口径</b> = 不退保，第一个满足「累计已领年金/特别年金（含当年，末年另加满期金）（+ 累计现金红利）≥ 累计已交保费」的保单年度。此口径不动用现金价值。<br>
+   <b>IRR</b> = 交费期内每年年初交保费为流出，起领年度起每年末领年金（按各产品规则，可能含特别年金）为流入，评估年度末退保领取现金价值为最后一笔流入（即退保口径）。<br>
+   <b>含分红口径</b> = 现金红利型产品，按<b>当年红利直接领取现金、不累积生息</b>计算。友邦说明书即按此口径演示（其累计红利列为逐年简单累加，已核对一致）；大都会说明书按累积生息演示，本工具取其「当年度红利」列按直接领取建模，累计红利为简单累加、不含利息，低于说明书「累积红利」列。
+   若实际选择「储存于本公司生息」或「抵缴保险费」，现金流时点不同，IRR 会高于此处数值；增额红利型产品的红利计入保额而非现金，需另行建模，不适用本口径。<br>
+   <b>说明书演示段</b>的打平年度与 IRR 口径同上；累计现金红利由逐年演示值累加得出，与说明书累计列可能有几元的取整差异。</div></details>
+  ${anyDemo||!items.some(x=>x.p.dividend_method!=='不分红')?'':'<div class="info">这套投保条件没有对应的官方利益演示，因此「利益试算」段只能给出保证利益，无法计算含分红 IRR。分红折算率公司未公开，任何非官方的红利推算都不可靠；含分红数据可看上表「说明书演示」段各产品的官方案例。</div>'}
+  ${ok.length?chart(ok):''}`;
+ if(CMPH)transposeCmp();
+ renderYears();
+}
+function yearTable(x,i,withDiv){
+ const r=x.pj.rows,F=r[r.length-1],p=x.p,vl=x.pj.v?varLabel(p.product_id,x.pj.v):'';
+ const hasZ=r.some(y=>y.zs>0);
+ const rowNote=p.demo_same_row==='是'
+   ?'说明书演示同样把第 N 个保单周年日给付的年金列在第 N 行，行号可直接对照。'
+   :'说明书演示把第 N 个保单周年日给付的年金列在第 N+1 行（年度初），本表列在第 N 行（年度末），时点相同只是行号差一。';
+ const deathNote=p.death_net_paid==='是'
+   ?'身故保险金列同说明书演示口径：周年日现价（含当日给付）与「累计已交保费 − 此前已领生存年金'+(hasZ?'与祝寿金':'')+'」取较大者。'
+   :'身故保险金列同说明书演示口径：周年日现价（含当日给付）与累计已交保费取较大者。';
+ const endNote=F.mat
+   ?`期满日现价为 0，期满金 ${fmt(F.mat)} 与当年年金另付，合计 ${fmt(F.tot)}，为累计已交保费的 ${(F.tot/F.cum*100).toFixed(1)}%。`
+   :`期满日现价为 0，<b>无满期金</b>，只领当年年金 ${fmt(F.ann)}；全期累计已领年金${hasZ?'与祝寿金':''} ${fmt(F.tot)}，为累计已交保费的 ${(F.tot/F.cum*100).toFixed(1)}%。`;
+ return `<details class="card"><summary style="color:${CLR[i]}">${esc(p.product_name)}${vl?'（'+esc(vl)+'）':''} · 逐年利益</summary>
+ <div class="scroll lock"><table><tr><th class="n">保单年度</th><th class="n">年龄</th><th class="n">累计已交保费</th>
+  <th class="n">当年年金</th><th class="n">累计已领年金</th><th class="n">现金价值</th><th class="n">身故保险金</th>
+  <th class="n">现价+已领年金</th>${withDiv?'<th class="n">当年现金红利</th><th class="n">累计现金红利</th><th class="n">合计（含红利）</th>':''}</tr>
+ ${r.map(y=>`<tr><td class="n">${y.n}</td><td class="n">${y.age}</td><td class="n">${fmt(y.cum)}</td>
+  <td class="n">${y.ann?fmt(y.ann):'—'}${y.zs?'<br><span class="src">含祝寿金 '+fmt(y.zs)+'</span>':''}${y.mat?'<br><span class="src">+满期 '+fmt(y.mat)+'</span>':''}</td>
+  <td class="n">${fmt(y.cumA)}</td><td class="n">${fmt(y.cv)}</td><td class="n">${fmt(y.death)}</td>
+  <td class="n">${fmt(y.tot)}</td>
+  ${withDiv?`<td class="n">${fmt(y.div)}</td><td class="n">${fmt(y.cumD)}</td><td class="n">${fmt(y.totD)}</td>`:''}</tr>`).join('')}
+ </table></div>
+ ${x.pj.ex?`<p class="src">该产品现价表列值<b>不含</b>当个周年日给付的年金${hasZ?'、祝寿金':''}与满期金，本表"当年年金"与"现金价值"并列即为同一周年日的两笔钱；
+  "现价+已领年金"已把当日年金${hasZ?'（含祝寿金）':''}计入。${rowNote}
+  ${deathNote}
+  ${endNote}</p>`
+ :`<p class="src">末年（第 ${F.n} 保单年度）现价 ${fmt(F.cv)}，为累计已交保费的 ${(F.cv/F.cum*100).toFixed(1)}%；连同累计已领年金合计 ${fmt(F.tot)}，为 ${(F.tot/F.cum*100).toFixed(1)}%。</p>`}</details>`;
+}
+function chart(items){
+ const W=700,H=250,L=62,R=12,T=10,B=24;
+ const maxN=Math.max(...items.map(x=>x.pj.last));
+ const max=Math.max(...items.flatMap(x=>x.pj.rows.map(r=>Math.max(r.tot,r.cum))));
+ const px=n=>L+(n-1)/(maxN-1)*(W-L-R), py=v=>T+(1-v/max)*(H-T-B);
+ const path=(rows,f,c,w,dash='')=>`<path fill="none" stroke="${c}" stroke-width="${w}" ${dash}
+   d="${rows.map((r,i)=>(i?'L':'M')+px(r.n).toFixed(1)+' '+py(f(r)).toFixed(1)).join(' ')}"/>`;
+ const gr=[0,.25,.5,.75,1].map(p=>{const v=max*p;return `<line x1="${L}" x2="${W-R}" y1="${py(v)}" y2="${py(v)}" stroke="#E4E8EC"/>
+   <text x="${L-6}" y="${py(v)+4}" text-anchor="end" font-size="10.5" fill="#8B97A3">${fmt(v)}</text>`}).join('');
+ const xs=[1,Math.round(maxN*.25),Math.round(maxN*.5),Math.round(maxN*.75),maxN].map(n=>
+   `<text x="${px(n)}" y="${H-7}" text-anchor="middle" font-size="10.5" fill="#8B97A3">${n}</text>`).join('');
+ return `<div class="card"><div class="scroll"><svg viewBox="0 0 ${W} ${H}" width="100%" style="min-width:520px;display:block"
+   role="img" aria-label="现价与累计年金合计的逐年曲线">${gr}${xs}
+  ${path(items[0].pj.rows,r=>r.cum,'#8B97A3',1.5,'stroke-dasharray="4 3"')}
+  ${items.map((x,i)=>path(x.pj.rows,r=>r.tot,CLR[i],2)).join('')}</svg></div>
+ <p class="legend"><i style="background:#8B97A3"></i>累计已交保费
+  ${items.map((x,i)=>`<i style="background:${CLR[i]};margin-left:13px"></i>${esc(x.p.product_name)}${x.pj.v?'·'+esc(varLabel(x.id,x.pj.v)):''}（现价+已领年金）`).join('')}
+  <br><span class="src">横轴为保单年度</span></p></div>`;
+}
+
+/* ============ 说明书演示（已并入对比总表第三段，见 runCalc） ============ */
+/* 红利口径说明：对比总表「说明书演示」段的「红利口径」行调用 */
+function divBasis(p){
+ if(p.dividend_method==='不分红')return '不分红，无红利演示';
+ const d=demoList(p.product_id).some(x=>Array.isArray(x.div)&&x.div.length);
+ if(!d)return '现金红利，说明书按<b>累积生息</b>演示且只列出部分年度，本工具未建模，只显示保证利益';
+ if(p.company_code==='MET'||p.company_code==='PA')return '现金红利，说明书按<b>累积生息</b>演示；本工具含分红口径按<b>当年红利直接领取现金、不累积生息</b>计算，逐年红利取自说明书「当年度红利」列（未列示年度按相邻年度线性插值），累计红利为逐年简单累加、不含利息，故低于说明书「累积红利」列';
+ return '现金红利，说明书按<b>当年红利直接领取现金、不累积生息</b>演示，含分红 IRR 即按此口径计算';
+}
+
+
+/* ============ 简洁对比（新版：筛选 + 试算 + 导出 Excel + 产品详情抽屉） ============ */
+/* ---------- 极简 xlsx 写出器：不依赖外部库，离线可用（OOXML + 无压缩 zip） ---------- */
+const CRC_T=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c>>>0;}return t;})();
+function crc32(u){let c=0xFFFFFFFF;for(let i=0;i<u.length;i++)c=CRC_T[(c^u[i])&255]^(c>>>8);return (c^0xFFFFFFFF)>>>0;}
+function zipStore(files){ /* files: [{name, data:Uint8Array}] */
+ const enc=new TextEncoder(), parts=[], cen=[]; let off=0;
+ const le=(n,b)=>{const a=new Uint8Array(b);for(let i=0;i<b;i++)a[i]=(n>>>(8*i))&255;return a;};
+ for(const f of files){
+  const nm=enc.encode(f.name), crc=crc32(f.data), sz=f.data.length;
+  const head=[le(0x04034b50,4),le(20,2),le(0x0800,2),le(0,2),le(0,2),le(0x21,2),le(crc,4),le(sz,4),le(sz,4),le(nm.length,2),le(0,2),nm];
+  const hl=head.reduce((s,a)=>s+a.length,0);
+  parts.push(...head,f.data);
+  cen.push(le(0x02014b50,4),le(20,2),le(20,2),le(0x0800,2),le(0,2),le(0,2),le(0x21,2),le(crc,4),le(sz,4),le(sz,4),
+   le(nm.length,2),le(0,2),le(0,2),le(0,2),le(0,2),le(0,4),le(off,4),nm);
+  off+=hl+sz;}
+ const cl=cen.reduce((s,a)=>s+a.length,0);
+ const end=[le(0x06054b50,4),le(0,2),le(0,2),le(files.length,2),le(files.length,2),le(cl,4),le(off,4),le(0,2)];
+ return new Blob([...parts,...cen,...end],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});}
+const xesc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g,'');
+function colName(i){let s='';i++;while(i){const m=(i-1)%26;s=String.fromCharCode(65+m)+s;i=Math.floor((i-1)/26);}return s;}
+/* sheet: {name, rows:[[cell]], widths:[n], freeze:{r,c}}；cell: string | number | {v, s} ；s=样式号 */
+function sheetXml(sh){
+ const rows=sh.rows.map((row,ri)=>`<row r="${ri+1}">${row.map((c,ci)=>{
+   if(c==null||c==='')return '';
+   const o=typeof c==='object'?c:{v:c}, ref=colName(ci)+(ri+1), st=o.s!=null?` s="${o.s}"`:'';
+   return typeof o.v==='number'?`<c r="${ref}"${st}><v>${o.v}</v></c>`
+     :`<c r="${ref}"${st} t="inlineStr"><is><t xml:space="preserve">${xesc(o.v)}</t></is></c>`;}).join('')}</row>`).join('');
+ const fz=sh.freeze?`<sheetViews><sheetView workbookViewId="0"><pane xSplit="${sh.freeze.c}" ySplit="${sh.freeze.r}" topLeftCell="${colName(sh.freeze.c)}${sh.freeze.r+1}" activePane="bottomRight" state="frozen"/></sheetView></sheetViews>`:'';
+ const cols=sh.widths?`<cols>${sh.widths.map((w,i)=>`<col min="${i+1}" max="${i+1}" width="${w}" customWidth="1"/>`).join('')}</cols>`:'';
+ const mg=sh.merges&&sh.merges.length?`<mergeCells count="${sh.merges.length}">${sh.merges.map(m=>`<mergeCell ref="${m}"/>`).join('')}</mergeCells>`:'';
+ return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${fz}${cols}<sheetData>${rows}</sheetData>${mg}</worksheet>`;}
+function buildXlsx(sheets){
+ const enc=new TextEncoder(), f=[];
+ const add=(n,x)=>f.push({name:n,data:enc.encode(x)});
+ add('[Content_Types].xml',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((_,i)=>`<Override PartName="/xl/worksheets/sheet${i+1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('')}</Types>`);
+ add('_rels/.rels',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`);
+ add('xl/workbook.xml',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((s,i)=>`<sheet name="${xesc(s.name)}" sheetId="${i+1}" r:id="rId${i+1}"/>`).join('')}</sheets></workbook>`);
+ add('xl/_rels/workbook.xml.rels',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((_,i)=>`<Relationship Id="rId${i+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i+1}.xml"/>`).join('')}<Relationship Id="rId${sheets.length+1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`);
+ /* 样式：0 常规 · 1 表头(白字深底粗体) · 2 百分比 0.00% · 3 自动换行靠上 · 4 分段标题(粗体浅底) · 5 行名(粗体靠上) · 6 百分比加粗 · 7 灰色说明 */
+ add('xl/styles.xml',`<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="2"><numFmt numFmtId="164" formatCode="0.00%"/><numFmt numFmtId="165" formatCode="&quot;第 &quot;0&quot; 年&quot;"/></numFmts><fonts count="4"><font><sz val="10.5"/><name val="微软雅黑"/></font><font><b/><sz val="10.5"/><color rgb="FFFFFFFF"/><name val="微软雅黑"/></font><font><b/><sz val="10.5"/><name val="微软雅黑"/></font><font><sz val="9.5"/><color rgb="FF6B7785"/><name val="微软雅黑"/></font></fonts><fills count="4"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FF1B2733"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE6EEF4"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"><color rgb="FFD5DBE1"/></left><right style="thin"><color rgb="FFD5DBE1"/></right><top style="thin"><color rgb="FFD5DBE1"/></top><bottom style="thin"><color rgb="FFD5DBE1"/></bottom></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="9"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf xfId="0" numFmtId="0" fontId="1" fillId="2" borderId="1" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment wrapText="1" vertical="center"/></xf><xf xfId="0" fillId="0" fontId="0" numFmtId="164" borderId="1" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="top"/></xf><xf xfId="0" fillId="0" fontId="0" numFmtId="0" borderId="1" applyBorder="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf xfId="0" numFmtId="0" fontId="2" fillId="3" borderId="1" applyFont="1" applyFill="1" applyBorder="1"/><xf xfId="0" fillId="0" numFmtId="0" fontId="2" borderId="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf xfId="0" fillId="0" numFmtId="164" fontId="2" borderId="1" applyNumberFormat="1" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="top"/></xf><xf xfId="0" borderId="0" fillId="0" numFmtId="0" fontId="3" applyFont="1" applyAlignment="1"><alignment wrapText="1" vertical="top"/></xf><xf xfId="0" numFmtId="165" fontId="0" fillId="0" borderId="1" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="top"/></xf></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`);
+ sheets.forEach((sh,i)=>add(`xl/worksheets/sheet${i+1}.xml`,sheetXml(sh)));
+ return zipStore(f);}
+(function(){
+const UPDATED='2026-09-20';
+const pp=x=>x==null?'—':(x*100).toFixed(2)+'%';
+
+/* ============ 产品形态：统一口径的短句（条款原文见详情） ============ */
+const SHORT={
+ 'AIA-ANN-001':{term:'至105周岁',start:'第5个保单周年日',ann:'基本保额×20%/年，64岁后×40%',spec:'无',mat:'返还已交保费',death:'max（已交保费，现价）'},
+ 'AIA-ANN-002':{term:'至105周岁',start:'第5个保单周年日',ann:'基本保额×20%/年，64岁后×40%',spec:'无',mat:'返还已交保费',death:'max（已交保费，现价）'},
+ 'AIA-ANN-003':{term:'至105周岁',start:'趸交第5年、3年交第6年、5年交第7年',ann:'已交保费×1.25%/年',spec:'第10年起每满5年给已交保费×2.6%',mat:'一个基本保额',death:'max（已交保费，现价）'},
+ 'AIA-ANN-004':{term:'至105周岁',start:'趸交第5年、3年交第6年、5年交第7年',ann:'已交保费×1.25%/年',spec:'第10年起每满5年给已交保费×2.6%',mat:'一个基本保额',death:'max（已交保费，现价）'},
+ 'MSL-ANN-001':{term:'至105周岁',start:'趸交/3年交第7年，交费期越长越晚',ann:'已交保费×2%/年（可月领）',spec:'连领2次，每次一个基本保额（趸交/3年交第5、6年起）',mat:'返还已交保费',death:'max（已交保费，现价）'},
+ 'MSL-ANN-002':{term:'至85或100周岁（二选一）',start:'第5个保单周年日',ann:'基本保额×10%/年',spec:'可选祝寿金：已交保费×5%/年，领20年',mat:'无',death:'max（已交保费−已领年金，现价）'},
+ 'MET-ANN-001':{term:'至105周岁',start:'第5个保单周年日',ann:'基本保额×100%/年（可月领8.4%）',spec:'无',mat:'无',death:'max（已交保费−已领年金，现价）'},
+ 'MET-ANN-002':{term:'至105周岁',start:'趸交第5年、3年交第6年、5年交第7年',ann:'已交保费×1.75%/年',spec:'一次性一个基本保额（趸交/3年交第5年、5年交第6年）',mat:'返还已交保费',death:'max（已交保费，现价）'},
+ 'PA-ANN-001':{term:'领取期间届满后的下一个周年日（领取9/14/19/24/29年或至105周岁）',start:'趸交第5年起、期交交满且第6年起，最晚90岁，投保时约定',ann:'基本保额×100%/年（可月领8.4%）',spec:'无',mat:'一个基本保额',death:'max（已交保费−已领年金，现价）'}};
+const payList=p=>(p.payment_terms||'').split('|').map(x=>x.replace(/[（(].*$/,'').trim()).join('、');
+const ageTxt=p=>(p.entry_age_min||'0')+(p.entry_age_min_unit||'')+'~'+p.entry_age_max_years+'周岁';
+const shortName=p=>(p.short_name||p.product_name);
+const FIELDS=[
+ ['ch','渠道',p=>p.channel==='个险代理人'?'个险':p.channel],
+ ['des','类型',p=>p.design_type==='分红型'?'分红':'普通'],
+ ['launch','上市日期',p=>p.launch_date||'—'],
+ ['age','投保年龄',ageTxt],
+ ['pay','交费期间',payList],
+ ['term','保险期间',p=>SHORT[p.product_id]?.term||cleanText(p.policy_terms)],
+ ['start','首次领取',p=>SHORT[p.product_id]?.start||cleanText(p.annuity_start)],
+ ['ann','年金',p=>SHORT[p.product_id]?.ann||cleanText(p.survival_benefit)],
+ ['spec','特别年金/加码',p=>SHORT[p.product_id]?.spec||cleanText(p.special_survival_benefit)],
+ ['mat','满期金',p=>SHORT[p.product_id]?.mat||cleanText(p.maturity_benefit)],
+ ['death','身故金',p=>SHORT[p.product_id]?.death||cleanText(p.death_benefit)]];
+
+/* ============ 状态 ============ */
+const ALLT=(()=>{const s=new Set();for(const p in D.rate)for(const g in D.rate[p]){const c={};
+ Object.keys(D.rate[p][g]).forEach(k=>{const t=+k.split('|')[0];c[t]=(c[t]||0)+1;});
+ Object.keys(c).forEach(t=>{if(c[t]>1)s.add(+t);});}return [...s].sort((a,b)=>a-b);})();
+const DEF={co:'',ch:'',des:'',own:'',q:'',g:'男',a:40,terms:[0,3,5,10],view:'col',shape:true};
+let S=JSON.parse(JSON.stringify(DEF));
+let PICK=new Set(), ONLY=false, SORT={k:null,d:1};
+const tTxt=t=>t?t+'年交':'趸交';
+
+/* 不能试算的原因 */
+function naWhy(p,g,t,a){
+ const offered=(p.payment_terms||'').split('|').some(x=>(t===0?/趸/.test(x):new RegExp('^'+t+'年').test(x.trim())));
+ if(!offered)return '无此交费期';
+ if(a>+p.entry_age_max_years)return '超投保年龄';
+ const n=Object.keys(D.cv[p.product_id]?.[g]||{}).filter(k=>+k.split('|')[0]===t).length;
+ if(n<=1)return '现价未公开';
+ return '不可售';}
+function calc(p,g,a,t,v){
+ const pj=project(p.product_id,g,t,a,100000,null,v);
+ if(!pj)return {t,na:naWhy(p,g,t,a)};
+ const n70=70-a, rs=pj.rows;
+ /* 现价趋势（简写）：首年、峰值及其年度、末年，均为「退保可得 ÷ 累计已交保费」 */
+ let pk=0,pkN=1; rs.forEach(x=>{const q=x.cvS/x.cum; if(q>pk){pk=q;pkN=x.n;}});
+ const tr={c1:rs[0].cvS/rs[0].cum, pk, pkN, cE:rs[rs.length-1].cvS/rs[rs.length-1].cum};
+ return {t,be:breakeven(pj,false),to70:(n70>=1&&pj.last>=n70)?irr(pj,n70,false):null,
+  end:irr(pj,pj.last,false),endAge:a+pj.last,tr};}
+const p0=x=>x==null?'—':Math.round(x*100)+'%';
+const trTxt=m=>m.na?m.na:`${p0(m.tr.c1)} → ${p0(m.tr.pk)}（第${m.tr.pkN}年）→ ${p0(m.tr.cE)}`;
+/* 红利计算方式：说明书演示所用的口径 */
+function divWay(p){
+ if(p.design_type!=='分红型')return '不分红';
+ if(p.company_code==='MET'||p.company_code==='PA')return '现金红利·说明书按累积生息演示\n（本工具还原为当年红利现金领取）';
+ return '现金红利·当年红利现金领取';}
+/* 说明书演示：每款取第一个带红利列的官方案例 */
+const DEMO={};
+P.forEach(p=>{const ds=demoList(p.product_id);
+ const d=ds.find(x=>Array.isArray(x.div)&&x.div.length)||ds[0];
+ if(!d)return;
+ const hasDiv=Array.isArray(d.div)&&d.div.length;
+ const pj=project(p.product_id,d.gender,d.term,d.age,d.premium,hasDiv?d.div:null,d.variant);if(!pj)return;
+ const acc=p.company_code==='MET'||p.company_code==='PA';
+ DEMO[p.product_id]={irr:hasDiv?irr(pj,pj.last,true):null,g:irr(pj,pj.last,false),
+  be:breakeven(pj,false),beD:hasDiv?breakeven(pj,true):null,way:divWay(p),
+  cs:`${d.gender}${d.age}岁 · ${d.term?d.term+'年交':'趸交'}`,case:d.case,
+  basis:!hasDiv?'普通型产品，说明书演示即为保证利益，无红利':(acc?'说明书按累积生息演示；本工具取「当年红利」列按现金领取、不计息（未列示年度线性插值）':'说明书当年红利现金领取口径')};});
+function rowsNow(){
+ const q=S.q.trim();
+ return P.filter(p=>(!S.co||p.company_code===S.co)&&(!S.ch||p.channel===S.ch)
+   &&(!S.des||(S.des==='分红'?p.design_type==='分红型':p.design_type!=='分红型'))
+   &&(!S.own||(S.own==='own'?isOwn(p):!isOwn(p)))
+   &&(!q||[p.product_name,p.short_name,p.company,CO[p.company_code]].join(' ').includes(q))
+   &&(!ONLY||PICK.has(p.product_id)))
+  .map(p=>{const v=varOf(p.product_id,S.g);
+   return {p,id:p.product_id,v,vl:v?varLabel(p.product_id,v):'',m:S.terms.map(t=>calc(p,S.g,S.a,t,v)),dm:DEMO[p.product_id]};});
+}
+
+/* ============ 列定义（一行一款） ============ */
+function cols(){
+ const C=[{k:'name',g:'',l:'产品',sort:r=>(isOwn(r.p)?'0':'1')+r.p.company_code+shortName(r.p)}];
+ (S.shape?FIELDS:FIELDS.slice(0,2)).forEach(([k,l,f])=>C.push({k,g:'产品形态',l,txt:r=>f(r.p),sort:k==='launch'?r=>r.p.launch_date||'':null,cls:'t'}));
+ S.terms.forEach((t,i)=>{
+  C.push({k:'cv'+t,g:tTxt(t),l:'现价趋势\n首年→峰值→末年',txt:r=>trTxt(r.m[i]),na:r=>r.m[i].na,cls:'trend',
+    sort:r=>r.m[i].na?'':String(Math.round((r.m[i].tr.pk||0)*1000)).padStart(5,'0')});
+  C.push({k:'be'+t,g:tTxt(t),l:'保证返本',num:r=>r.m[i].be,na:r=>r.m[i].na,fmt:x=>x?'第'+x+'年':'未返本',asc:true});
+  C.push({k:'i70'+t,g:tTxt(t),l:'保证IRR至70岁',num:r=>r.m[i].to70,na:r=>r.m[i].na,fmt:pp});
+  C.push({k:'ie'+t,g:tTxt(t),l:'保证IRR至满期',num:r=>r.m[i].end,na:r=>r.m[i].na,fmt:pp,bold:true});});
+ const G='说明书演示', dna=r=>r.dm?null:'无演示';
+ C.push({k:'dcase',g:G,l:'官方案例',txt:r=>r.dm?r.dm.cs:'',na:dna,dv:true,cls:'t'});
+ C.push({k:'dbe',g:G,l:'保证返本',num:r=>r.dm?.be,na:dna,fmt:x=>x?'第'+x+'年':'未返本',asc:true,dv:true});
+ C.push({k:'dbeD',g:G,l:'含红利返本',num:r=>r.dm?.beD,na:r=>r.dm?(r.p.design_type!=='分红型'?'不分红':null):'无演示',fmt:x=>x?'第'+x+'年':'未返本',asc:true,dv:true});
+ C.push({k:'die',g:G,l:'保证IRR至满期',num:r=>r.dm?.g,na:dna,fmt:pp,dv:true});
+ C.push({k:'dieD',g:G,l:'含红利IRR至满期',num:r=>r.dm?.irr,na:r=>r.dm?(r.p.design_type!=='分红型'?'不分红':null):'无演示',fmt:pp,bold:true,dv:true});
+ C.push({k:'dway',g:G,l:'红利计算方式',txt:r=>divWay(r.p),dv:true,cls:'t'});
+ return C;}
+function cellVal(c,r){
+ const na=c.na&&c.na(r);
+ if(c.num){if(na)return {na};const x=c.num(r);return {x,s:x==null?'—':c.fmt(x)};}
+ if(na&&c.k!=='dway')return {na};
+ return {s:c.txt?c.txt(r):''};}
+function nameCell(r){
+ const vs=variantsOf(r.id,S.g);
+ return `<input type="checkbox" class="pick" data-id="${r.id}"${PICK.has(r.id)?' checked':''} aria-label="勾选">
+  ${isOwn(r.p)?'<span class="tag mine">我司</span>':''}<span class="tag">${esc(CO[r.p.company_code]||'')}</span><button class="pn" data-id="${r.id}">${esc(shortName(r.p))}</button>
+  ${vs?`<br><select class="vsel" data-id="${r.id}">${vs.map(x=>`<option value="${x.code}"${x.code===r.v?' selected':''}>${esc(x.label)}</option>`).join('')}</select>`:''}`;}
+function dvCell(r,c,v){
+ if(v.na)return `<td class="na dv">${esc(v.na)}</td>`;
+ const ti=r.dm?` title="${esc(r.dm.case+'；'+r.dm.basis)}"`:'';
+ if(c.k==='dcase')return `<td class="t dv"${ti}>${esc(v.s)}<br><span class="muted">点产品名看完整案例</span></td>`;
+ if(c.k==='dway')return `<td class="t dv">${esc(v.s)}</td>`;
+ return `<td class="n dv${c.bold?' b':''}"${ti}>${v.s}</td>`;}
+
+/* ============ 渲染 ============ */
+function render(){
+ const R=rowsNow(), C=cols();
+ document.getElementById('lt-only').textContent=`只看勾选（${PICK.size}）`;
+ document.getElementById('lt-only').setAttribute('aria-pressed',ONLY);
+ if(SORT.k){const c=C.find(x=>x.k===SORT.k);if(c){
+   R.sort((a,b)=>{let x,y;
+    if(c.num){x=c.na&&c.na(a)?null:c.num(a);y=c.na&&c.na(b)?null:c.num(b);
+      if(x==null&&y==null)return 0;if(x==null)return 1;if(y==null)return -1;return (x-y)*SORT.d;}
+    x=c.sort?c.sort(a):cellVal(c,a).s;y=c.sort?c.sort(b):cellVal(c,b).s;return x.localeCompare(y,'zh')*SORT.d;});}}
+ highlights(R);
+ const el=document.getElementById('lt-tbl');
+ if(!R.length){el.innerHTML='<div style="padding:24px;text-align:center" class="muted">没有符合条件的产品，放宽筛选或点「重置全部」。</div>';
+  document.getElementById('lt-cnt').textContent='';return;}
+ el.innerHTML=S.view==='row'?rowTable(R,C):colTable(R,C);
+ document.getElementById('lt-cnt').textContent=`共 ${R.length} 款 · ${S.g} ${S.a} 周岁 · 点产品名看详情${S.view==='row'?' · 点表头排序':' · 切到「一行一款」可点表头排序'} · 保证利益均不含红利`;
+ bindTable();}
+function rowTable(R,C){
+ const groups=[];C.forEach(c=>{const l=groups[groups.length-1];if(l&&l.g===c.g)l.n++;else groups.push({g:c.g,n:1});});
+ const ar=k=>SORT.k===k?`<span class="ar">${SORT.d>0?'▲':'▼'}</span>`:'';
+ return `<table><thead><tr>${groups.map((g,i)=>i===0?`<th class="stk" rowspan="2" style="min-width:170px" data-k="name">产品${ar('name')}</th>`
+   :`<th class="g${g.g.startsWith('说明书')?' dv':''}" colspan="${g.n}">${esc(g.g)}</th>`).join('')}</tr>
+  <tr>${C.slice(1).map(c=>`<th class="s" data-k="${c.k}">${esc(c.l).replace(/\n/g,'<br>')}${ar(c.k)}</th>`).join('')}</tr></thead>
+  <tbody>${R.map(r=>`<tr class="${isOwn(r.p)?'ownr':''}"><td class="stk">${nameCell(r)}</td>
+   ${C.slice(1).map(c=>{const v=cellVal(c,r);
+     if(c.dv)return dvCell(r,c,v);
+     if(v.na)return `<td class="na">${esc(v.na)}</td>`;
+     return c.num?`<td class="n${c.bold?' b':''}">${v.s}</td>`:`<td class="${c.cls||''}">${esc(v.s)}</td>`;}).join('')}</tr>`).join('')}
+  </tbody></table>`;}
+function colTable(R,C){
+ const rows=[];let lastG=null;
+ C.slice(1).forEach(c=>{if(c.g!==lastG){rows.push(`<tr class="sec"><th class="fld">${esc(c.g)}</th><td colspan="${R.length}"></td></tr>`);lastG=c.g;}
+  const vals=R.map(r=>cellVal(c,r).s??'');const diff=R.length>1&&new Set(vals).size>1;
+  rows.push(`<tr><th class="fld"${diff?' style="color:var(--own)"':''}>${esc(c.l).replace(/\n/g,'<br>')}</th>${R.map(r=>{const v=cellVal(c,r);
+   if(c.dv)return dvCell(r,c,v);
+   if(v.na)return `<td class="na">${esc(v.na)}</td>`;
+   return c.num?`<td class="n${c.bold?' b':''}">${v.s}</td>`:`<td class="t">${esc(v.s)}</td>`;}).join('')}</tr>`);});
+ return `<table><thead><tr><th class="stk" style="min-width:110px">产品</th>${R.map(r=>`<th style="min-width:170px;white-space:normal">${nameCell(r)}</th>`).join('')}</tr></thead>
+  <tbody>${rows.join('')}</tbody></table>`;}
+function highlights(R){
+ const el=document.getElementById('lt-hl');
+ const cov=S.terms.map((t,i)=>({t,i,n:R.filter(r=>!r.m[i].na).length})).sort((a,b)=>b.n-a.n||a.t-b.t)[0];
+ if(!cov||cov.n<2){el.innerHTML='';return;}
+ const ok=R.filter(r=>!r.m[cov.i].na), T=tTxt(cov.t);
+ const nm=r=>(isOwn(r.p)?'我司 ':'')+(CO[r.p.company_code]||'')+shortName(r.p);
+ const top=ok.slice().sort((a,b)=>b.m[cov.i].end-a.m[cov.i].end)[0];
+ const t70=ok.filter(r=>r.m[cov.i].to70!=null).sort((a,b)=>b.m[cov.i].to70-a.m[cov.i].to70)[0];
+ const fast=ok.filter(r=>r.m[cov.i].be).sort((a,b)=>a.m[cov.i].be-b.m[cov.i].be)[0];
+ const out=[`<span>${T}保证IRR至满期最高：<b>${esc(nm(top))} ${pp(top.m[cov.i].end)}</b></span>`];
+ if(t70)out.push(`<span>${T}保证IRR至70岁最高：<b>${esc(nm(t70))} ${pp(t70.m[cov.i].to70)}</b></span>`);
+ if(fast)out.push(`<span>${T}返本最快：<b>${esc(nm(fast))} 第${fast.m[cov.i].be}年</b></span>`);
+ const byE=ok.slice().sort((a,b)=>b.m[cov.i].end-a.m[cov.i].end);
+ ok.filter(r=>isOwn(r.p)).forEach(r=>out.push(`<span class="o">我司${esc(shortName(r.p))}：保证IRR至满期排 <b>第${byE.indexOf(r)+1}/${ok.length}</b></span>`));
+ el.innerHTML=out.join('');}
+function bindTable(){
+ const el=document.getElementById('lt-tbl');
+ el.querySelectorAll('thead th[data-k]').forEach(th=>th.onclick=()=>{const k=th.dataset.k;
+  if(SORT.k===k)SORT.d=-SORT.d;else{SORT.k=k;const c=cols().find(x=>x.k===k);SORT.d=c&&c.num&&!c.asc?-1:1;}render();});
+ el.querySelectorAll('.pick').forEach(cb=>cb.onchange=()=>{cb.checked?PICK.add(cb.dataset.id):PICK.delete(cb.dataset.id);
+  if(ONLY&&!PICK.size)ONLY=false;render();});
+ el.querySelectorAll('.vsel').forEach(s=>s.onchange=()=>{VAR[s.dataset.id]=s.value;render();});
+ el.querySelectorAll('.pn').forEach(b=>b.onclick=()=>openDr(b.dataset.id));}
+
+/* ============ 详情抽屉 ============ */
+let DRP={id:null,t:null,prem:100000};
+function openDr(id){DRP.id=id;const p=byId[id];
+ const av=S.terms.find(t=>project(id,S.g,t,S.a,1000,null,varOf(id,S.g)))??ALLT.find(t=>project(id,S.g,t,S.a,1000,null,varOf(id,S.g)));
+ DRP.t=av??0;drawDr();document.getElementById('lt-dr').classList.add('on');}
+function drawDr(){
+ const p=byId[DRP.id], id=DRP.id, v=varOf(id,S.g), vs=variantsOf(id,S.g);
+ const terms=ALLT.filter(t=>project(id,S.g,t,S.a,1000,null,v));
+ const pj=project(id,S.g,DRP.t,S.a,DRP.prem,null,v);
+ const T=(k)=>esc(cleanText(p[k]||'—'));
+ const dm=DEMO[id], off=OFFICIAL[p.company_code];
+ document.getElementById('lt-drc').innerHTML=`
+ <h2>${isOwn(p)?'<span class="tag mine">我司</span>':''}${esc(p.product_name)}</h2>
+ <div class="muted">${esc(p.company)} · ${esc(p.channel)} · ${esc(p.design_type)} · 上市 ${esc(p.launch_date||'—')}</div>
+ <h3>条款要点</h3><dl>
+  <dt>投保年龄</dt><dd>${esc(ageTxt(p))}</dd><dt>交费期间</dt><dd>${T('payment_terms')}</dd>
+  <dt>保险期间</dt><dd>${T('policy_terms')}</dd><dt>年金起领</dt><dd>${T('annuity_start')}</dd>
+  <dt>年金</dt><dd>${T('survival_benefit')}</dd><dt>特别年金</dt><dd>${T('special_survival_benefit')}</dd>
+  <dt>满期金</dt><dd>${T('maturity_benefit')}</dd><dt>身故金</dt><dd>${T('death_benefit')}</dd>
+  <dt>其他约定</dt><dd>${T('other_benefit')}</dd></dl>
+ <h3>逐年利益（保证）</h3>
+ <div class="grid" style="margin-bottom:8px">
+  <div><label class="l">交费期间</label><select id="lt-d-t">${terms.map(t=>`<option value="${t}"${t===DRP.t?' selected':''}>${tTxt(t)}</option>`).join('')}</select></div>
+  <div><label class="l">${DRP.t?'年交保费（元）':'趸交保费（元）'}</label><input id="lt-d-m" type="number" value="${DRP.prem}" step="10000" min="1000"></div>
+  ${vs?`<div><label class="l">方案</label><select id="lt-d-v">${vs.map(x=>`<option value="${x.code}"${x.code===v?' selected':''}>${esc(x.label)}</option>`).join('')}</select></div>`:''}
+ </div>
+ ${pj?`<div class="muted" style="margin-bottom:6px">${S.g} ${S.a} 周岁 · ${tTxt(DRP.t)} · 基本保额 ${fmt(pj.SA)} 元 · 保证IRR至满期 ${pp(irr(pj,pj.last,false))} · 保证返本 ${breakeven(pj,false)?'第'+breakeven(pj,false)+'年':'未返本'}</div>
+ <div class="yt"><table><thead><tr><th>年度</th><th>年龄</th><th>累计保费</th><th>当年领取</th><th>累计领取</th><th>退保可得</th><th>退保可得<br>＋已领</th><th>身故金</th></tr></thead>
+ <tbody>${pj.rows.map(r=>`<tr><td class="n">${r.n}</td><td class="n">${r.age}</td><td class="n">${fmt(r.cum)}</td><td class="n">${fmt(r.ann+(r.mat||0))}</td><td class="n">${fmt(r.cumA+(r.mat||0))}</td><td class="n">${fmt(r.cvS)}</td><td class="n">${fmt(r.tot)}</td><td class="n">${fmt(r.death)}</td></tr>`).join('')}</tbody></table></div>
+ <p class="muted">退保可得＝现价（含当日年金，末年含满期金）；当年领取末年含满期金。</p>`
+ :`<div class="muted">${S.g} ${S.a} 周岁这个组合无法试算（${esc(naWhy(p,S.g,DRP.t,S.a))}）。</div>`}
+ <h3>红利演示（非保证）</h3>
+ <div class="dvbox">${p.design_type!=='分红型'?'普通型产品，不分红。':dm?`说明书案例：${esc(dm.case)}<br>
+  保证IRR <b>${pp(dm.g)}</b> → 含红利IRR <b>${pp(dm.irr)}</b><br><span class="muted">${esc(dm.basis)}。红利不保证，不同产品案例条件不同，只宜看量级。</span>`:'无官方红利演示。'}</div>
+ <h3>条款原文</h3>
+ ${off?`<p style="margin:0 0 4px"><a href="${off[1]}" target="_blank" rel="noopener">${esc(off[0])}</a></p>
+  <p class="muted" style="margin:0">条款、产品说明书、费率表、现金价值表均在该入口公开，打开后按产品名称查找。</p>`:'<p class="muted">暂无官网入口。</p>'}`;
+ const q=x=>document.getElementById(x);
+ q('lt-d-t').onchange=e=>{DRP.t=+e.target.value;drawDr();};
+ q('lt-d-m').onchange=e=>{DRP.prem=+e.target.value||100000;drawDr();};
+ if(q('lt-d-v'))q('lt-d-v').onchange=e=>{VAR[id]=e.target.value;drawDr();render();};}
+function closeDr(){document.getElementById('lt-dr').classList.remove('on');}
+document.querySelector('#lt-dr .mask').onclick=closeDr;document.querySelector('#lt-dr .x').onclick=closeDr;
+addEventListener('keydown',e=>{if(e.key==='Escape')closeDr();});
+
+/* ============ 导出 Excel（复用本页的 xlsx 写出器） ============ */
+function exportXlsx(){
+ const R=rowsNow(), C=cols(), day=new Date().toISOString().slice(0,10);
+ if(!R.length){alert('没有可导出的产品');return;}
+ const flt=[S.co?CO[S.co]:'全部公司',S.ch||'全部渠道',S.des?(S.des==='分红'?'分红型':'普通型'):'分红/普通全部',S.own?(S.own==='own'?'我司':'同业'):'我司+同业',S.q?'搜索：'+S.q:'',ONLY?'只看勾选':''].filter(Boolean).join('，');
+ /* 表1 对比表：与网页「一列一款」一致——项目在行、产品在列 */
+ const lab=x=>String(x).replace(/\n/g,'，');
+ const T1=[[{v:`快返年金同业对比 · ${S.g} ${S.a} 周岁 · 筛选：${flt} · 导出 ${day}`,s:5}],
+  [{v:'产品',s:1},...R.map(r=>({v:(isOwn(r.p)?'【我司】':'')+(CO[r.p.company_code]||'')+' '+shortName(r.p)+(r.vl?'\n'+r.vl:''),s:1}))]];
+ const merges=[`A1:${colName(R.length)}1`];
+ const secRow=t=>{T1.push([{v:t,s:4},...R.map(()=>({v:'',s:4}))]);merges.push(`A${T1.length}:${colName(R.length)}${T1.length}`);};
+ let lastG=null;
+ C.slice(1).forEach(c=>{
+  if(c.g!==lastG){secRow(c.g);lastG=c.g;}
+  const row=[{v:lab(c.l),s:5}];
+  R.forEach(r=>{const v=cellVal(c,r);
+   if(v.na){row.push({v:v.na,s:3});return;}
+   if(c.num){if(v.x==null){row.push({v:'—',s:3});return;}
+    const isYear=/^(be|dbe)/.test(c.k);
+    row.push({v:isYear?v.x:+v.x.toFixed(6),s:isYear?8:(c.bold?6:2)});return;}
+   row.push({v:lab(v.s),s:3});});
+  T1.push(row);});
+ secRow('说明书演示 · 案例原文');
+ T1.push([{v:'案例与口径',s:5},...R.map(r=>({v:r.dm?r.dm.case+'；'+r.dm.basis:(r.p.design_type!=='分红型'?'不分红':'无演示'),s:3}))]);
+ /* 表2 明细：长表，方便透视（男女 × 关键年龄 × 全部交费期 × 全部方案） */
+ const T2=[['公司','产品','渠道','类型','方案','性别','投保年龄','交费期间','保证返本年度','保证IRR至70岁','保证IRR至满期','满期年龄'].map(h=>({v:h,s:1}))];
+ R.forEach(r=>['男','女'].forEach(g=>{const vs=variantsOf(r.id,g), codes=vs?vs.map(x=>x.code):[undefined];
+  codes.forEach(v=>[0,10,20,30,40,50,60,70].forEach(a=>ALLT.forEach(t=>{
+   const m=calc(r.p,g,a,t,v); if(m.na)return;
+   T2.push([{v:(isOwn(r.p)?'【我司】':'')+(CO[r.p.company_code]||''),s:3},{v:shortName(r.p),s:3},{v:r.p.channel,s:3},{v:r.p.design_type,s:3},
+    {v:v?varLabel(r.id,v):'—',s:3},{v:g,s:3},{v:a,s:3},{v:tTxt(t),s:3},
+    m.be?{v:m.be,s:8}:{v:'未返本',s:3}, m.to70==null?{v:'—',s:3}:{v:+m.to70.toFixed(6),s:2},{v:+m.end.toFixed(6),s:2},{v:m.endAge,s:3}]);})));}));
+ const T3=[[{v:'口径说明',s:5}]].concat([...document.querySelectorAll('details.foot li')].map(li=>[{v:li.textContent,s:3}]));
+ T3.push([],[{v:'数据更新至 '+UPDATED+'；导出日期 '+day,s:7}]);
+ const blob=buildXlsx([
+  {name:'对比表',rows:T1,widths:[26,...R.map(()=>34)],freeze:{r:2,c:1},merges},
+  {name:'IRR明细',rows:T2,widths:[10,18,12,10,26,6,9,10,13,13,13,9],freeze:{r:1,c:2}},
+  {name:'口径说明',rows:T3,widths:[140]}]);
+ const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`快返年金同业对比_${day}.xlsx`;
+ document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1500);}
+
+/* ============ 初始化 ============ */
+function initUI(){
+ const q=x=>document.getElementById(x);
+ const cos=[...new Set(P.map(p=>p.company_code))], chs=[...new Set(P.map(p=>p.channel))];
+ q('lt-f-co').innerHTML='<option value="">全部</option>'+cos.map(c=>`<option value="${c}">${esc(CO[c]||c)}</option>`).join('');
+ q('lt-f-ch').innerHTML='<option value="">全部</option>'+chs.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
+ const maxA=Math.max(...P.map(p=>+p.entry_age_max_years));
+ q('lt-c-a').innerHTML=Array.from({length:maxA+1},(_,i)=>`<option value="${i}">${i} 周岁</option>`).join('');
+ q('lt-c-t').innerHTML=ALLT.map(t=>`<button data-t="${t}">${tTxt(t)}</button>`).join('');
+ q('lt-meta').textContent=`${P.length} 款产品 · ${new Set(P.map(p=>p.company_code)).size} 家公司 · 数据更新至 ${UPDATED} · 数值由官方费率表与现价表还原`;
+ sync();
+ ['co','ch','des','own'].forEach(k=>q('lt-f-'+k).onchange=e=>{S[k]=e.target.value;render();});
+ q('lt-f-q').oninput=e=>{S.q=e.target.value;render();};
+ q('lt-c-g').onchange=e=>{S.g=e.target.value;render();};
+ q('lt-c-a').onchange=e=>{S.a=+e.target.value;render();};
+ q('lt-c-t').querySelectorAll('button').forEach(b=>b.onclick=()=>{const t=+b.dataset.t;
+  if(S.terms.includes(t)){if(S.terms.length>1)S.terms=S.terms.filter(x=>x!==t);}else S.terms=[...S.terms,t].sort((a,b)=>a-b);
+  if(SORT.k&&!cols().some(c=>c.k===SORT.k))SORT.k=null;sync();render();});
+ q('lt-v-mode').querySelectorAll('button').forEach(b=>b.onclick=()=>{S.view=b.dataset.v;sync();render();q('lt-tbl').scrollLeft=0;q('lt-tbl').scrollTop=0;});
+ q('lt-v-shape').querySelectorAll('button').forEach(b=>b.onclick=()=>{S.shape=b.dataset.s==='1';
+  if(SORT.k&&!cols().some(c=>c.k===SORT.k))SORT.k=null;sync();render();q('lt-tbl').scrollLeft=0;});
+ q('lt-only').onclick=()=>{if(!PICK.size){alert('先在产品名前勾选要对比的产品');return;}ONLY=!ONLY;render();};
+ q('lt-clr').onclick=()=>{PICK.clear();ONLY=false;render();};
+ q('lt-reset').onclick=()=>{S=JSON.parse(JSON.stringify(DEF));PICK.clear();ONLY=false;SORT={k:null,d:1};
+  for(const k in VAR)delete VAR[k];q('lt-f-q').value='';sync();render();};
+ q('lt-xls').onclick=exportXlsx;
+ render();}
+function sync(){const q=x=>document.getElementById(x);
+ q('lt-f-co').value=S.co;q('lt-f-ch').value=S.ch;q('lt-f-des').value=S.des;q('lt-f-own').value=S.own;q('lt-c-g').value=S.g;q('lt-c-a').value=S.a;
+ q('lt-c-t').querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',S.terms.includes(+b.dataset.t)));
+ q('lt-v-mode').querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===S.view));
+ q('lt-v-shape').querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',(b.dataset.s==='1')===S.shape));}
+window.__liteInit=initUI;
+
+})();
+
+/* ============ 导航 ============ */
+const TABS=[['v-sum','市场洞察'],['v-simple','简洁对比'],['v-list','产品对比']];
+const nav=document.getElementById('tabs');
+TABS.forEach(([id,label],i)=>{const b=document.createElement('button');
+ b.textContent=label;b.setAttribute('role','tab');b.setAttribute('aria-selected',i===0);
+ b.onclick=()=>TABS.forEach(([tid],j)=>{document.getElementById(tid).hidden=(j!==i);
+   nav.children[j].setAttribute('aria-selected',j===i);});
+ nav.appendChild(b);});
+/* 字号档：0=自动(按屏幕宽度选，窄屏紧凑、平板标准、大屏放大，转屏或改窗口大小时跟着变)；
+   手动点了 1/2/3 就固定下来，不再自动调整。 */
+let DENS=0;
+function applyDens(){
+ const d=DENS||(innerWidth<1500?1:2);   /* 默认与「简洁对比」同一档字号，超宽屏再放大一档 */
+ document.body.className=d===1?'':'d'+d;}
+document.querySelectorAll('#dens button').forEach(b=>b.onclick=()=>{
+ DENS=+b.dataset.d; applyDens();
+ document.querySelectorAll('#dens button').forEach(o=>o.setAttribute('aria-pressed',o===b));});
+addEventListener('resize',()=>{if(!DENS)applyDens();});
+applyDens();
+refresh();
+window.__liteInit&&window.__liteInit();
+document.getElementById('boot')?.remove();
+</script></body></html>

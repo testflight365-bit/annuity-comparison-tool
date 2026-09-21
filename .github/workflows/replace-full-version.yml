@@ -1,0 +1,44 @@
+name: replace-full-version
+on:
+  push:
+    paths:
+      - '.github/workflows/replace-full-version.yml'
+      - '.deploy-root/**'
+permissions:
+  contents: write
+jobs:
+  replace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Rebuild exact uploaded HTML
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re,hashlib
+          old=Path("index.html").read_text("utf-8")
+          m=re.search(r'<script id="d" type="application/json">(.*?)</script>',old,re.S)
+          if not m:
+              raise SystemExit("data block not found")
+          data=m.group(1)
+          if hashlib.sha256(data.encode()).hexdigest()!="c05745bad3aa6a2b8fd4c6ac12a0a3f2cae02c0a03299af3c323bf35379a9520":
+              raise SystemExit("database hash mismatch")
+          prefix=Path(".deploy-root/prefix.txt").read_text("utf-8")
+          suffix=Path(".deploy-root/suffix.txt").read_text("utf-8")
+          out=prefix+'<script id="d" type="application/json">'+data+'</script>\n'+suffix
+          b=out.encode("utf-8")
+          got=hashlib.sha256(b).hexdigest()
+          if len(b)!=4692996 or got!="f9a4ac8e2b2c0d88802590e048db254abc3d8748267e58adc1baf8f249841d25":
+              raise SystemExit(f"file mismatch {len(b)} {got}")
+          Path("index.html").write_bytes(b)
+          print("INDEX_OK",len(b),got)
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git commit -m "Replace full version with latest uploaded HTML"
+          git push origin HEAD:main
