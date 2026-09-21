@@ -19,3 +19,5 @@ jobs:
           print("ROOT_JSON_SHA",hashlib.sha256(j).hexdigest())
           print("ROOT_JSON_BYTES",len(j))
           PY
+
+# trigger
