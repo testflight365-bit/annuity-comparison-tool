@@ -1,0 +1,26 @@
+name: inspect-current-root-json
+on:
+  push:
+    paths:
+      - '.github/workflows/inspect-root-json.yml'
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Hash embedded data
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re,hashlib
+          s=Path("index.html").read_text("utf-8")
+          m=re.search(r'<script id="d" type="application/json">(.*?)</script>',s,re.S)
+          if not m: raise SystemExit("DATA_BLOCK_NOT_FOUND")
+          j=m.group(1)
+          print("CURRENT_JSON_BYTES",len(j.encode("utf-8")))
+          print("CURRENT_JSON_SHA256",hashlib.sha256(j.encode("utf-8")).hexdigest())
+          print("CURRENT_FULL_BYTES",len(s.encode("utf-8")))
+          print("CURRENT_FULL_SHA256",hashlib.sha256(s.encode("utf-8")).hexdigest())
+          PY
